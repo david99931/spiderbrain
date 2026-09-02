@@ -7,6 +7,7 @@ import SpiderbrainKit
 /// if there is one, shows up in the pen-to-ink gap, not in a screenshot.
 struct ContentView: View {
     @State private var engine: Engine = .metal
+    @State private var mode: DrawMode = .draw
     @State private var predictionEnabled = true
     @State private var stats = MetalInkView.HUDStats()
     @State private var clearToken = 0
@@ -18,12 +19,19 @@ struct ContentView: View {
         var id: String { rawValue }
     }
 
+    enum DrawMode: String, CaseIterable, Identifiable {
+        case draw = "Draw"
+        case lasso = "Lasso"
+        var id: String { rawValue }
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             Group {
                 switch engine {
                 case .metal:
                     MetalInkCanvas(
+                        mode: mode,
                         predictionEnabled: predictionEnabled,
                         clearToken: clearToken,
                         undoToken: undoToken,
@@ -51,6 +59,12 @@ struct ContentView: View {
                 .frame(width: 240)
 
                 if engine == .metal {
+                    Picker("Mode", selection: $mode) {
+                        ForEach(DrawMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 160)
+
                     Toggle("Prediction", isOn: $predictionEnabled)
                         .toggleStyle(.switch)
                         .fixedSize()
@@ -101,6 +115,7 @@ struct ContentView: View {
 // MARK: - Bridges
 
 private struct MetalInkCanvas: UIViewRepresentable {
+    var mode: ContentView.DrawMode
     var predictionEnabled: Bool
     var clearToken: Int
     var undoToken: Int
@@ -117,6 +132,9 @@ private struct MetalInkCanvas: UIViewRepresentable {
     }
 
     func updateUIView(_ view: MetalInkView, context: Context) {
+        // Update mode
+        view.drawMode = mode == .draw ? .draw : .lasso
+
         view.predictionEnabled = predictionEnabled
         if context.coordinator.lastClear != clearToken {
             context.coordinator.lastClear = clearToken

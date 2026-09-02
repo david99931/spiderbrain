@@ -24,6 +24,21 @@ public final class MetalInkView: UIView {
     /// Camera for pan and zoom. M2: world-space coordinates.
     public var camera = Camera()
 
+    /// M2 prototype: Draw mode vs Lasso mode for node creation.
+    public enum DrawMode {
+        case draw
+        case lasso
+    }
+
+    /// Current drawing mode.
+    public var drawMode: DrawMode = .draw
+
+    /// M2 prototype: Nodes created from ink selections.
+    private var nodes: [Node] = []
+
+    /// M2 prototype: Current lasso path (in view space) while drawing the selection.
+    private var lassoPath: [Vec2] = []
+
     /// Current ink settings. Changing this affects the next stroke.
     public var style: InkStyle = .pen
 
@@ -145,28 +160,55 @@ public final class MetalInkView: UIView {
     // MARK: - Touches
 
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        // Only accept Apple Pencil touches for drawing
+        // Only accept Apple Pencil touches
         guard let touch = touches.first, touch.type == .pencil else { return }
-        collector.begin(touch, in: self)
+
+        switch drawMode {
+        case .draw:
+            collector.begin(touch, in: self)
+        case .lasso:
+            lassoPath.removeAll()
+            let location = touch.preciseLocation(in: self)
+            lassoPath.append(Vec2(Double(location.x), Double(location.y)))
+        }
         needsRedraw = true
     }
 
     public override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        // Only accept Apple Pencil touches for drawing
+        // Only accept Apple Pencil touches
         guard let touch = touches.first, touch.type == .pencil else { return }
-        collector.update(with: touch, event: event, in: self)
+
+        switch drawMode {
+        case .draw:
+            collector.update(with: touch, event: event, in: self)
+        case .lasso:
+            let location = touch.preciseLocation(in: self)
+            lassoPath.append(Vec2(Double(location.x), Double(location.y)))
+        }
         needsRedraw = true
     }
 
     public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        // Only accept Apple Pencil touches for drawing
+        // Only accept Apple Pencil touches
         guard let touch = touches.first, touch.type == .pencil else { return }
-        let points = collector.finish(touch, in: self)
-        commit(points)
+
+        switch drawMode {
+        case .draw:
+            let points = collector.finish(touch, in: self)
+            commit(points)
+        case .lasso:
+            // Close the lasso and create a node from selected strokes
+            let location = touch.preciseLocation(in: self)
+            lassoPath.append(Vec2(Double(location.x), Double(location.y)))
+            finalizeLasso()
+            lassoPath.removeAll()
+        }
+        needsRedraw = true
     }
 
     public override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         collector.reset()
+        lassoPath.removeAll()
         needsRedraw = true
     }
 
@@ -209,6 +251,89 @@ public final class MetalInkView: UIView {
 
         collector.reset()
         needsRedraw = true
+    }
+
+    // MARK: - Lasso Selection
+
+    /// Finalize the lasso: find strokes inside, create a node, remove them from the canvas.
+    private func finalizeLasso() {
+        guard lassoPath.count > 3 else { return }  // Need at least a small closed shape
+
+        // Convert lasso path from view space to world space
+        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
+        let worldLasso = lassoPath.map { camera.viewToWorld($0, viewSize: viewSize) }
+
+        // Find strokes that are inside the lasso
+        var selectedStrokes: [Stroke] = []
+        var remainingStrokes: [Stroke] = []
+
+        for stroke in strokes {
+            if isStrokeInsideLasso(stroke, lasso: worldLasso) {
+                selectedStrokes.append(stroke)
+            } else {
+                remainingStrokes.append(stroke)
+            }
+        }
+
+        guard !selectedStrokes.isEmpty else { return }
+
+        // Create a node from the selected strokes
+        if let bounds = Node.computeBounds(selectedStrokes) {
+            let node = Node(strokes: selectedStrokes, bounds: bounds)
+            nodes.append(node)
+
+            // Remove selected strokes from the main stroke list
+            strokes = remainingStrokes
+
+            // Rebuild committed vertices without the selected strokes
+            rebuildCommittedGeometry()
+        }
+    }
+
+    /// Check if a stroke is inside the lasso polygon (uses bounding box + sampling).
+    private func isStrokeInsideLasso(_ stroke: Stroke, lasso: [Vec2]) -> Bool {
+        // Simple heuristic: check if most sample points are inside the lasso
+        let sampleCount = min(stroke.points.count, 10)
+        let step = max(1, stroke.points.count / sampleCount)
+        var insideCount = 0
+
+        for i in stride(from: 0, to: stroke.points.count, by: step) {
+            if pointInPolygon(stroke.points[i].position, polygon: lasso) {
+                insideCount += 1
+            }
+        }
+
+        // If more than half the samples are inside, consider the stroke selected
+        return insideCount > sampleCount / 2
+    }
+
+    /// Point-in-polygon test using ray casting algorithm.
+    private func pointInPolygon(_ point: Vec2, polygon: [Vec2]) -> Bool {
+        guard polygon.count > 2 else { return false }
+
+        var inside = false
+        var j = polygon.count - 1
+
+        for i in 0..<polygon.count {
+            let pi = polygon[i]
+            let pj = polygon[j]
+
+            if ((pi.y > point.y) != (pj.y > point.y)) &&
+               (point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x) {
+                inside.toggle()
+            }
+            j = i
+        }
+
+        return inside
+    }
+
+    /// Rebuild committed geometry from current strokes (used after lasso selection).
+    private func rebuildCommittedGeometry() {
+        committedVertices = strokes.flatMap { stroke in
+            Tessellator.tessellate(StrokeSmoother.resample(stroke.points), style: stroke.style)
+        }
+        renderer.setCommittedGeometry(committedVertices)
     }
 
     public func clear() {
