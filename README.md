@@ -29,8 +29,13 @@ eventually gets shared with the macOS target.
 
 ## Running it
 
-You need a Mac with Xcode and **a physical iPad** — the simulator has no Metal
-device and no Pencil, so the app will trap on launch there.
+You need a Mac with Xcode and **a physical iPad**.
+
+The simulator is not a substitute. On Apple Silicon it will probably launch and
+draw, but there is no Apple Pencil behind a mouse cursor: no pressure, no tilt, no
+coalesced samples, and nothing meaningful for prediction to extrapolate. Every
+stroke comes out at one constant width, which is precisely the thing M1 exists to
+evaluate.
 
 ### 1. Run the tests first
 
