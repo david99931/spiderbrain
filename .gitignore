@@ -1,0 +1,25 @@
+# Reference only — a clone of ericmjl/canvas-chat with its own git history.
+# Kept locally for reading, deliberately not part of this repo.
+canvas-chat/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+DerivedData/
+build/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# Secrets — API keys live in the keychain, never in the repo
+*.xcconfig.local
+Secrets.plist
