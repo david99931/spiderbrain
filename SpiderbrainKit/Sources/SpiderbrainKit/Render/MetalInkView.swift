@@ -21,6 +21,9 @@ public final class MetalInkView: UIView {
     private var committedVertices: [InkVertex] = []
     private var needsRedraw = true
 
+    /// Camera for pan and zoom. M2: world-space coordinates.
+    public var camera = Camera()
+
     /// Current ink settings. Changing this affects the next stroke.
     public var style: InkStyle = .pen
 
@@ -84,7 +87,8 @@ public final class MetalInkView: UIView {
     }
 
     private func configure() {
-        isMultipleTouchEnabled = false
+        // M2: enable multitouch for pan/zoom gestures while Pencil draws
+        isMultipleTouchEnabled = true
         isOpaque = true
         backgroundColor = .clear
 
@@ -95,6 +99,25 @@ public final class MetalInkView: UIView {
         // Default is 3. Triple buffering adds a frame of latency; for ink, trade
         // throughput for responsiveness.
         metalLayer.maximumDrawableCount = 2
+
+        // One-finger pan gesture (for easy navigation)
+        let oneFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handlePan))
+        oneFingerPan.minimumNumberOfTouches = 1
+        oneFingerPan.maximumNumberOfTouches = 1
+        oneFingerPan.delegate = self
+        addGestureRecognizer(oneFingerPan)
+
+        // Two-finger pan gesture
+        let twoFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handlePan))
+        twoFingerPan.minimumNumberOfTouches = 2
+        twoFingerPan.maximumNumberOfTouches = 2
+        twoFingerPan.delegate = self
+        addGestureRecognizer(twoFingerPan)
+
+        // Pinch-to-zoom gesture
+        let pinchGesture = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch))
+        pinchGesture.delegate = self
+        addGestureRecognizer(pinchGesture)
 
         let link = CADisplayLink(target: self, selector: #selector(step))
         // ProMotion parks at 60 Hz unless you ask for more. The minimum stays at 60
@@ -122,19 +145,22 @@ public final class MetalInkView: UIView {
     // MARK: - Touches
 
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = touches.first else { return }
+        // Only accept Apple Pencil touches for drawing
+        guard let touch = touches.first, touch.type == .pencil else { return }
         collector.begin(touch, in: self)
         needsRedraw = true
     }
 
     public override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = touches.first else { return }
+        // Only accept Apple Pencil touches for drawing
+        guard let touch = touches.first, touch.type == .pencil else { return }
         collector.update(with: touch, event: event, in: self)
         needsRedraw = true
     }
 
     public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = touches.first else { return }
+        // Only accept Apple Pencil touches for drawing
+        guard let touch = touches.first, touch.type == .pencil else { return }
         let points = collector.finish(touch, in: self)
         commit(points)
     }
@@ -154,17 +180,29 @@ public final class MetalInkView: UIView {
 
     // MARK: - Commit
 
+    /// Convert points from view space (where touches happen) to world space (where strokes live).
+    private func toWorldSpace(_ points: [InkPoint]) -> [InkPoint] {
+        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
+        return points.map { point in
+            var worldPoint = point
+            worldPoint.position = camera.viewToWorld(point.position, viewSize: viewSize)
+            return worldPoint
+        }
+    }
+
     private func commit(_ points: [InkPoint]) {
         guard points.count > 0 else {
             collector.reset()
             return
         }
-        let stroke = Stroke(points: points, style: style)
+        // Convert from view space to world space before storing
+        let worldPoints = toWorldSpace(points)
+        let stroke = Stroke(points: worldPoints, style: style)
         strokes.append(stroke)
 
         // Append this stroke's geometry to the committed buffer rather than
         // re-tessellating every stroke. M2 replaces this with tile rasterisation.
-        let resampled = StrokeSmoother.resample(points)
+        let resampled = StrokeSmoother.resample(worldPoints)
         committedVertices.append(contentsOf: Tessellator.tessellate(resampled, style: stroke.style))
         renderer.setCommittedGeometry(committedVertices)
         renderer.setLiveGeometry([])
@@ -207,7 +245,9 @@ public final class MetalInkView: UIView {
 
         if collector.isDrawing {
             let points = collector.renderPoints
-            let resampled = StrokeSmoother.resample(points)
+            // Convert live points to world space before tessellating
+            let worldPoints = toWorldSpace(points)
+            let resampled = StrokeSmoother.resample(worldPoints)
             renderer.setLiveGeometry(Tessellator.tessellate(resampled, style: style))
             needsRedraw = true
         }
@@ -215,7 +255,7 @@ public final class MetalInkView: UIView {
         guard needsRedraw else { return }
         needsRedraw = false
 
-        renderer.draw(in: metalLayer, alpha: style.alpha)
+        renderer.draw(in: metalLayer, alpha: style.alpha, cameraOffset: camera.offset, cameraZoom: camera.zoom)
 
         onStatsUpdate?(HUDStats(
             strokeCount: strokes.count,
@@ -227,6 +267,50 @@ public final class MetalInkView: UIView {
             cpuFrameMilliseconds: renderer.stats.lastFrameMilliseconds,
             displayFPS: smoothedFPS
         ))
+    }
+
+    // MARK: - Gestures
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: self)
+        camera.pan(by: Vec2(Double(translation.x), Double(translation.y)))
+        gesture.setTranslation(.zero, in: self)
+        needsRedraw = true
+    }
+
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        let location = gesture.location(in: self)
+        let anchor = Vec2(Double(location.x), Double(location.y))
+        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
+
+        camera.zoom(by: Float(gesture.scale), anchor: anchor, viewSize: viewSize)
+        gesture.scale = 1.0
+        needsRedraw = true
+    }
+}
+
+// MARK: - UIGestureRecognizerDelegate
+
+extension MetalInkView: UIGestureRecognizerDelegate {
+    /// Allow pan and pinch to work simultaneously with each other.
+    public func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        // Pan and pinch can work together
+        return true
+    }
+
+    /// Prevent gestures from starting while actively drawing with the Pencil.
+    public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        // Don't allow pan/zoom to start while drawing
+        return !collector.isDrawing
+    }
+
+    /// Only allow finger touches for gestures, not the Pencil.
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // Pencil should not trigger pan/zoom gestures
+        return touch.type != .pencil
     }
 }
 #endif

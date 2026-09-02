@@ -128,7 +128,7 @@ public final class InkRenderer {
 
     // MARK: - Drawing
 
-    public func draw(in layer: CAMetalLayer, alpha: Double) {
+    public func draw(in layer: CAMetalLayer, alpha: Double, cameraOffset: Vec2 = .zero, cameraZoom: Float = 1.0) {
         let started = CACurrentMediaTime()
 
         let size = layer.drawableSize
@@ -159,6 +159,15 @@ public final class InkRenderer {
                 Float(size.height / layer.contentsScale)
             )
             encoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+
+            // Camera transform for world-to-view conversion.
+            var cameraUniforms = SIMD4<Float>(
+                Float(cameraOffset.x),
+                Float(cameraOffset.y),
+                cameraZoom,
+                0  // padding
+            )
+            encoder.setVertexBytes(&cameraUniforms, length: MemoryLayout<SIMD4<Float>>.stride, index: 2)
 
             if let committedBuffer, committedVertexCount > 0 {
                 encoder.setVertexBuffer(committedBuffer, offset: 0, index: 0)

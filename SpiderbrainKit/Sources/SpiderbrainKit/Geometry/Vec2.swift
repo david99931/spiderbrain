@@ -20,6 +20,12 @@ public struct Vec2: Equatable, Sendable {
     public static func - (a: Vec2, b: Vec2) -> Vec2 { Vec2(a.x - b.x, a.y - b.y) }
     public static func * (v: Vec2, s: Double) -> Vec2 { Vec2(v.x * s, v.y * s) }
     public static func * (s: Double, v: Vec2) -> Vec2 { v * s }
+    public static func / (v: Vec2, s: Double) -> Vec2 { Vec2(v.x / s, v.y / s) }
+
+    // Float overloads for camera math
+    public static func * (v: Vec2, s: Float) -> Vec2 { v * Double(s) }
+    public static func * (s: Float, v: Vec2) -> Vec2 { v * Double(s) }
+    public static func / (v: Vec2, s: Float) -> Vec2 { v / Double(s) }
 
     public var length: Double { (x * x + y * y).squareRoot() }
 

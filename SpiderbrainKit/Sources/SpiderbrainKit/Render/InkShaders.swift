@@ -25,20 +25,35 @@ enum InkShaders {
         float2 viewportSize;  // in points
     };
 
+    struct CameraUniforms {
+        float2 offset;  // world-space position at view center
+        float zoom;     // scale factor (1.0 = 100%)
+        float _pad;     // align to 16 bytes
+    };
+
     struct RasterData {
         float4 position [[position]];
         float3 color;
     };
 
-    // Ink pass: view points -> normalised device coordinates.
+    // Ink pass: world points -> view points -> normalised device coordinates.
+    // M2: Vertices are in world space. Camera transforms them to view space.
     // UIKit is y-down and NDC is y-up, so y is flipped here.
     vertex RasterData ink_vertex(uint id [[vertex_id]],
                                  constant InkVertex *vertices [[buffer(0)]],
-                                 constant Uniforms &uniforms [[buffer(1)]]) {
+                                 constant Uniforms &uniforms [[buffer(1)]],
+                                 constant CameraUniforms &camera [[buffer(2)]]) {
         InkVertex in = vertices[id];
         RasterData out;
-        float x = (in.position.x / uniforms.viewportSize.x) * 2.0 - 1.0;
-        float y = 1.0 - (in.position.y / uniforms.viewportSize.y) * 2.0;
+
+        // Transform world position to view position via camera
+        float2 worldPos = in.position;
+        float2 viewCenter = uniforms.viewportSize * 0.5;
+        float2 viewPos = (worldPos - camera.offset) * camera.zoom + viewCenter;
+
+        // View position to normalized device coordinates
+        float x = (viewPos.x / uniforms.viewportSize.x) * 2.0 - 1.0;
+        float y = 1.0 - (viewPos.y / uniforms.viewportSize.y) * 2.0;
         out.position = float4(x, y, 0.0, 1.0);
         out.color = in.color;
         return out;
