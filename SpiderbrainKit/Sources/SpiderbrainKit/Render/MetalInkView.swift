@@ -42,6 +42,28 @@ public final class MetalInkView: UIView {
         public var committedVertices = 0
         public var cpuFrameMilliseconds: Double = 0
         public var displayFPS: Double = 0
+
+        public init() {}
+
+        public init(
+            strokeCount: Int = 0,
+            liveSamples: Int = 0,
+            predictedSamples: Int = 0,
+            estimateCorrections: Int = 0,
+            liveVertices: Int = 0,
+            committedVertices: Int = 0,
+            cpuFrameMilliseconds: Double = 0,
+            displayFPS: Double = 0
+        ) {
+            self.strokeCount = strokeCount
+            self.liveSamples = liveSamples
+            self.predictedSamples = predictedSamples
+            self.estimateCorrections = estimateCorrections
+            self.liveVertices = liveVertices
+            self.committedVertices = committedVertices
+            self.cpuFrameMilliseconds = cpuFrameMilliseconds
+            self.displayFPS = displayFPS
+        }
     }
 
     private var lastFrameTimestamp: CFTimeInterval = 0
