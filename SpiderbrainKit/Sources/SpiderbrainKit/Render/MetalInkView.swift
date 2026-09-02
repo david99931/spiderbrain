@@ -39,6 +39,12 @@ public final class MetalInkView: UIView {
     /// M2 prototype: Current lasso path (in view space) while drawing the selection.
     private var lassoPath: [Vec2] = []
 
+    /// M2 prototype: Index of node currently being dragged, if any.
+    private var draggingNodeIndex: Int?
+
+    /// M2 prototype: Offset from drag start to node center (for smooth dragging).
+    private var dragOffset: Vec2 = .zero
+
     /// Current ink settings. Changing this affects the next stroke.
     public var style: InkStyle = .pen
 
@@ -251,6 +257,22 @@ public final class MetalInkView: UIView {
 
         collector.reset()
         needsRedraw = true
+    }
+
+    // MARK: - Node Interaction
+
+    /// Find the index of the node at the given point in view space (returns topmost if overlapping).
+    private func nodeAt(viewPoint: Vec2) -> Int? {
+        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
+        let worldPoint = camera.viewToWorld(viewPoint, viewSize: viewSize)
+
+        // Check nodes in reverse order (topmost first)
+        for (index, node) in nodes.enumerated().reversed() {
+            if node.contains(worldPoint) {
+                return index
+            }
+        }
+        return nil
     }
 
     // MARK: - Lasso Selection
@@ -488,10 +510,61 @@ public final class MetalInkView: UIView {
     // MARK: - Gestures
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
-        let translation = gesture.translation(in: self)
-        camera.pan(by: Vec2(Double(translation.x), Double(translation.y)))
-        gesture.setTranslation(.zero, in: self)
-        needsRedraw = true
+        switch gesture.state {
+        case .began:
+            // Check if we're starting on a node
+            let location = gesture.location(in: self)
+            let viewPoint = Vec2(Double(location.x), Double(location.y))
+
+            if let nodeIndex = nodeAt(viewPoint: viewPoint) {
+                // Start dragging this node
+                draggingNodeIndex = nodeIndex
+                let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
+                let worldPoint = camera.viewToWorld(viewPoint, viewSize: viewSize)
+                dragOffset = worldPoint - nodes[nodeIndex].bounds.center
+            }
+
+        case .changed:
+            if let nodeIndex = draggingNodeIndex {
+                // Drag the node
+                let location = gesture.location(in: self)
+                let viewPoint = Vec2(Double(location.x), Double(location.y))
+                let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
+                let worldPoint = camera.viewToWorld(viewPoint, viewSize: viewSize)
+
+                // Calculate new center accounting for drag offset
+                let newCenter = worldPoint - dragOffset
+                let currentCenter = nodes[nodeIndex].bounds.center
+                let delta = newCenter - currentCenter
+
+                // Move the node by updating its bounds
+                nodes[nodeIndex].bounds.x += delta.x
+                nodes[nodeIndex].bounds.y += delta.y
+
+                // Also move all strokes inside the node
+                for i in 0..<nodes[nodeIndex].strokes.count {
+                    for j in 0..<nodes[nodeIndex].strokes[i].points.count {
+                        nodes[nodeIndex].strokes[i].points[j].position =
+                            nodes[nodeIndex].strokes[i].points[j].position + delta
+                    }
+                }
+
+                rebuildCommittedGeometry()
+                needsRedraw = true
+            } else {
+                // Pan the canvas
+                let translation = gesture.translation(in: self)
+                camera.pan(by: Vec2(Double(translation.x), Double(translation.y)))
+                gesture.setTranslation(.zero, in: self)
+                needsRedraw = true
+            }
+
+        case .ended, .cancelled:
+            draggingNodeIndex = nil
+
+        default:
+            break
+        }
     }
 
     @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
