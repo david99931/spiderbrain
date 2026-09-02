@@ -333,11 +333,96 @@ public final class MetalInkView: UIView {
         committedVertices = strokes.flatMap { stroke in
             Tessellator.tessellate(StrokeSmoother.resample(stroke.points), style: stroke.style)
         }
+
+        // Add node geometry: bounds + contained strokes
+        for node in nodes {
+            // Render node bounds as a thick outline
+            committedVertices.append(contentsOf: nodeOutlineVertices(node))
+
+            // Render strokes inside the node
+            for stroke in node.strokes {
+                committedVertices.append(contentsOf: Tessellator.tessellate(
+                    StrokeSmoother.resample(stroke.points),
+                    style: stroke.style
+                ))
+            }
+        }
+
         renderer.setCommittedGeometry(committedVertices)
+    }
+
+    /// Generate line vertices for the lasso path (in world space).
+    private func lassoPathVertices() -> [InkVertex] {
+        guard lassoPath.count > 1 else { return [] }
+
+        // Convert lasso from view to world space
+        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
+        let worldLasso = lassoPath.map { camera.viewToWorld($0, viewSize: viewSize) }
+
+        // Create a stroke-like representation with fixed width
+        let lassoPoints = worldLasso.map { point in
+            InkPoint(
+                position: point,
+                force: 0.5,
+                altitude: .pi / 2,
+                azimuth: 0,
+                timestamp: 0
+            )
+        }
+
+        // Tessellate with a distinct color (blue for lasso)
+        let lassoStyle = InkStyle(
+            red: 0.2,
+            green: 0.5,
+            blue: 1.0,
+            alpha: 0.7,
+            pressure: PressureCurve(minWidth: 2, maxWidth: 2, exponent: 1.0, tiltBroadening: 0)
+        )
+        let resampled = StrokeSmoother.resample(lassoPoints)
+        return Tessellator.tessellate(resampled, style: lassoStyle)
+    }
+
+    /// Generate vertices for a node's bounding box outline.
+    private func nodeOutlineVertices(_ node: Node) -> [InkVertex] {
+        let b = node.bounds
+        let color = node.style.borderColor
+        let width = node.style.borderWidth
+
+        // Create four corners
+        let corners = [
+            Vec2(b.x, b.y),
+            Vec2(b.x + b.width, b.y),
+            Vec2(b.x + b.width, b.y + b.height),
+            Vec2(b.x, b.y + b.height),
+            Vec2(b.x, b.y)  // Close the loop
+        ]
+
+        // Convert to InkPoints with fixed pressure
+        let points = corners.map { corner in
+            InkPoint(
+                position: corner,
+                force: 0.5,
+                altitude: .pi / 2,
+                azimuth: 0,
+                timestamp: 0
+            )
+        }
+
+        // Tessellate the outline
+        let outlineStyle = InkStyle(
+            red: color.0,
+            green: color.1,
+            blue: color.2,
+            alpha: 1.0,
+            pressure: PressureCurve(minWidth: width, maxWidth: width, exponent: 1.0, tiltBroadening: 0)
+        )
+        let resampled = StrokeSmoother.resample(points)
+        return Tessellator.tessellate(resampled, style: outlineStyle)
     }
 
     public func clear() {
         strokes.removeAll()
+        nodes.removeAll()
         committedVertices.removeAll()
         renderer.setCommittedGeometry([])
         renderer.setLiveGeometry([])
@@ -348,11 +433,8 @@ public final class MetalInkView: UIView {
     public func undoLastStroke() {
         guard !strokes.isEmpty else { return }
         strokes.removeLast()
-        // Cheap and correct for M1: rebuild from the surviving strokes.
-        committedVertices = strokes.flatMap { stroke in
-            Tessellator.tessellate(StrokeSmoother.resample(stroke.points), style: stroke.style)
-        }
-        renderer.setCommittedGeometry(committedVertices)
+        // Rebuild from the surviving strokes
+        rebuildCommittedGeometry()
         needsRedraw = true
     }
 
@@ -368,14 +450,23 @@ public final class MetalInkView: UIView {
         }
         lastFrameTimestamp = link.timestamp
 
-        if collector.isDrawing {
+        // Build live geometry: current stroke OR lasso path
+        var liveVertices: [InkVertex] = []
+
+        if collector.isDrawing && drawMode == .draw {
             let points = collector.renderPoints
             // Convert live points to world space before tessellating
             let worldPoints = toWorldSpace(points)
             let resampled = StrokeSmoother.resample(worldPoints)
-            renderer.setLiveGeometry(Tessellator.tessellate(resampled, style: style))
+            liveVertices = Tessellator.tessellate(resampled, style: style)
+            needsRedraw = true
+        } else if !lassoPath.isEmpty && drawMode == .lasso {
+            // Render lasso path as a line
+            liveVertices = lassoPathVertices()
             needsRedraw = true
         }
+
+        renderer.setLiveGeometry(liveVertices)
 
         guard needsRedraw else { return }
         needsRedraw = false
