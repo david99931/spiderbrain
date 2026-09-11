@@ -1,7 +1,7 @@
 import Foundation
 
 /// Colour and width behaviour for a stroke.
-public struct InkStyle: Equatable, Sendable {
+public struct InkStyle: Equatable, Sendable, Codable {
     public var red: Double
     public var green: Double
     public var blue: Double

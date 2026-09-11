@@ -5,7 +5,7 @@ import Foundation
 /// Deliberately `Double`, not `Float`. World coordinates are kept in Float64 on the
 /// CPU and rebased against the camera origin before upload, so shaders always work
 /// with small numbers near zero. See the architecture plan, "Coordinate precision".
-public struct Vec2: Equatable, Sendable {
+public struct Vec2: Equatable, Hashable, Sendable, Codable {
     public var x: Double
     public var y: Double
 

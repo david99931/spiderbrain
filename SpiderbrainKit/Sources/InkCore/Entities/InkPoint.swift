@@ -5,7 +5,7 @@ import Foundation
 /// Apple Pencil delivers `force`, `altitude` and `azimuth` as *estimates* first and
 /// corrects them milliseconds later. `estimationIndex` is how a correction finds its
 /// way back to the right sample — see `StrokeInputCollector.applyEstimatedUpdate`.
-public struct InkPoint: Equatable, Sendable {
+public struct InkPoint: Equatable, Sendable, Codable {
     /// Position in view coordinates (points, y-down).
     public var position: Vec2
     /// Normalised 0...1. Fingers report 0 on devices without force, so the pressure

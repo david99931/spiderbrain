@@ -6,7 +6,7 @@ import Foundation
 /// blobby. A smoothstep with an exponent gives contrast in the middle of the range
 /// where handwriting actually lives, and `minWidth` guarantees a light stroke still
 /// leaves a mark.
-public struct PressureCurve: Equatable, Sendable {
+public struct PressureCurve: Equatable, Sendable, Codable {
     /// Width in points at zero force.
     public var minWidth: Double
     /// Width in points at full force.
