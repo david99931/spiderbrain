@@ -37,6 +37,35 @@ public final class MetalInkView: UIView {
     /// through this; the properties below are read-only views of its contents.
     private let canvas = CanvasCommandExecutor()
 
+    /// Announce a set of effects to peers in an order they can apply.
+    ///
+    /// Ordering is decided by `CanvasSyncPlanner`, not here: a peer rejects an edge
+    /// whose endpoints it has not seen and never retries, so nodes must precede the
+    /// edges naming them. Routing every broadcast through the planner makes that
+    /// structural rather than something each call site has to remember.
+    private func broadcast(_ effects: [CanvasEffect]) {
+        for intent in CanvasSyncPlanner.plan(for: effects) {
+            switch intent {
+            case .strokeAdded(let stroke):
+                onStrokeCommitted?(stroke)
+            case .strokeDeleted(let id):
+                onStrokeDeleted?(id)
+            case .nodeCreated(let node):
+                onNodeCreated?(node)
+            case .nodeCreatedConsumingStrokes(let node, let deletedStrokeIds):
+                onNodeCreatedWithStrokeDeletions?(node, deletedStrokeIds)
+            case .nodeUpdated(let node):
+                onNodeUpdated?(node)
+            case .nodeDeleted(let id):
+                onNodeDeleted?(id)
+            case .connectionCreated(let connection):
+                onConnectionCreated?(connection)
+            case .connectionDeleted(let id):
+                onConnectionDeleted?(id)
+            }
+        }
+    }
+
     /// Read-only views. Mutate via `canvas.execute`.
     private var strokes: [Stroke] { canvas.strokes }
     private var nodes: [Node] { canvas.nodes }
@@ -479,10 +508,7 @@ public final class MetalInkView: UIView {
 
         // Normal stroke creation (not a connection)
         let stroke = Stroke(points: worldPoints, style: style)
-        canvas.execute(.addStroke(stroke), origin: .local)
-
-        // Notify sync that a stroke was committed
-        onStrokeCommitted?(stroke)
+        broadcast(canvas.execute(.addStroke(stroke), origin: .local))
 
         // Append this stroke's geometry to the committed buffer rather than
         // re-tessellating every stroke. M2 replaces this with tile rasterisation.
@@ -649,10 +675,12 @@ public final class MetalInkView: UIView {
         }
 
         // One command: the node appears and its strokes leave the canvas together.
-        canvas.execute(.createNode(node, consumingStrokes: deletedStrokeIds), origin: .local)
+        let effects = canvas.execute(
+            .createNode(node, consumingStrokes: deletedStrokeIds),
+            origin: .local
+        )
 
-        // Notify sync about node creation with stroke deletions in one atomic message
-        onNodeCreatedWithStrokeDeletions?(node, deletedStrokeIds)
+        broadcast(effects)
 
         // Rebuild geometry
         rebuildCommittedGeometry()
@@ -722,20 +750,7 @@ public final class MetalInkView: UIView {
             origin: .local
         )
 
-        // Broadcast order matters. A peer applies `connect` only when both endpoints
-        // already exist, and nothing retries a rejected edge — so the merged node
-        // has to be announced before any edge that points at it.
-        for case .nodesRemoved(let ids) in effects {
-            for id in ids { onNodeDeleted?(id) }
-        }
-
-        // Notify sync about node creation with stroke deletions in one atomic message
-        onNodeCreatedWithStrokeDeletions?(mergedNode, deletedStrokeIds)
-
-        // Now the merged node exists on the peer, so the rewired edges will land.
-        for case .connectionAdded(let connection) in effects {
-            onConnectionCreated?(connection)
-        }
+        broadcast(effects)
 
         // Rebuild geometry
         rebuildCommittedGeometry()
@@ -858,19 +873,12 @@ public final class MetalInkView: UIView {
             // Don't recalculate bounds - keep the original circle size
             var absorbing = nodes[nodeIndex]
             absorbing.strokes.append(contentsOf: strokesToAbsorb)
-            canvas.execute(.updateNode(absorbing), origin: .local)
-            canvas.execute(
+            var effects = canvas.execute(.updateNode(absorbing), origin: .local)
+            effects += canvas.execute(
                 .deleteStrokes(ids: strokesToAbsorb.map(\.id)),
                 origin: .local
             )
-
-            // Notify sync about deleted strokes
-            for stroke in strokesToAbsorb {
-                onStrokeDeleted?(stroke.id)
-            }
-
-            // Notify sync about updated node
-            onNodeUpdated?(absorbing)
+            broadcast(effects)
 
             rebuildCommittedGeometry()
             needsRedraw = true
@@ -928,7 +936,7 @@ public final class MetalInkView: UIView {
         let effects = canvas.execute(.deleteNode(id: nodeId, returningStrokes: true), origin: .local)
         guard !effects.isEmpty else { return }
 
-        onNodeDeleted?(nodeId)
+        broadcast(effects)
 
         // Rebuild geometry
         rebuildCommittedGeometry()
@@ -1165,49 +1173,27 @@ public final class MetalInkView: UIView {
 
         let deletedNodeIds = nodesToRemove.map { nodes[$0].id }
 
-        var rewiredConnections: [Connection] = []
+        var effects: [CanvasEffect] = []
         if deletedNodeIds.isEmpty {
-            canvas.execute(.updateNode(absorbedNode), origin: .local)
+            effects += canvas.execute(.updateNode(absorbedNode), origin: .local)
         } else {
             // Nodes are being swallowed, so this is a merge: the executor removes
             // them and re-points their external edges at the surviving node.
-            let effects = canvas.execute(
+            effects += canvas.execute(
                 .mergeNodes(absorbing: deletedNodeIds + [absorbedNode.id],
                             into: absorbedNode,
                             consumingStrokes: []),
                 origin: .local
             )
-            for case .connectionAdded(let connection) in effects {
-                rewiredConnections.append(connection)
-            }
-        }
-
-        // Notify sync about deleted nodes
-        for nodeId in deletedNodeIds {
-            onNodeDeleted?(nodeId)
         }
 
         // Remove these strokes from the main canvas
         let absorbedStrokeIds = strokes
             .filter { strokeIdentifiers.contains(StrokeIdentifier(stroke: $0)) }
             .map(\.id)
-        canvas.execute(.deleteStrokes(ids: absorbedStrokeIds), origin: .local)
+        effects += canvas.execute(.deleteStrokes(ids: absorbedStrokeIds), origin: .local)
 
-        // Notify sync about deleted strokes
-        for strokeId in absorbedStrokeIds {
-            onStrokeDeleted?(strokeId)
-        }
-
-        // Notify sync about the surviving node. Read it back by id: the merge
-        // rebuilt the array, so nodeIndex no longer points where it did.
-        if let survivor = canvas.node(withId: absorbedNode.id) {
-            onNodeUpdated?(survivor)
-        }
-
-        // Only now that the peer has the surviving node do the rewired edges land.
-        for connection in rewiredConnections {
-            onConnectionCreated?(connection)
-        }
+        broadcast(effects)
 
         rebuildCommittedGeometry()
         needsRedraw = true
@@ -1232,18 +1218,11 @@ public final class MetalInkView: UIView {
                     separatedStrokeIds.append(stroke.id)
                 }
             }
-            canvas.execute(
+            let effects = canvas.execute(
                 .createNode(node, consumingStrokes: separatedStrokeIds),
                 origin: .local
             )
-
-            // Notify sync about deleted strokes
-            for strokeId in separatedStrokeIds {
-                onStrokeDeleted?(strokeId)
-            }
-
-            // Notify sync about created node
-            onNodeCreated?(node)
+            broadcast(effects)
 
             rebuildCommittedGeometry()
             needsRedraw = true
@@ -1479,13 +1458,9 @@ public final class MetalInkView: UIView {
     public func undoLastStroke() {
         let effects = canvas.execute(.removeLastStroke, origin: .local)
 
-        // Sync each removal. The executor reports only strokes that were really
-        // there, so an undo on an empty canvas broadcasts nothing.
-        for case .strokesRemoved(let ids) in effects {
-            for id in ids {
-                onStrokeDeleted?(id)
-            }
-        }
+        // The executor reports only strokes that were really there, so an undo on
+        // an empty canvas broadcasts nothing.
+        broadcast(effects)
 
         // Rebuild from the surviving strokes
         rebuildCommittedGeometry()
@@ -1588,9 +1563,7 @@ public final class MetalInkView: UIView {
         let effects = canvas.execute(.connect(from: sourceId, to: targetId), origin: .local)
         guard !effects.isEmpty else { return false }
 
-        for case .connectionAdded(let connection) in effects {
-            onConnectionCreated?(connection)
-        }
+        broadcast(effects)
 
         return true
     }
@@ -1605,11 +1578,7 @@ public final class MetalInkView: UIView {
             selectedConnectionId = nil
         }
 
-        for case .connectionsRemoved(let ids) in effects {
-            for removedId in ids {
-                onConnectionDeleted?(removedId)
-            }
-        }
+        broadcast(effects)
 
         // Rebuild geometry to remove the arrow
         rebuildCommittedGeometry()
@@ -1739,9 +1708,12 @@ public final class MetalInkView: UIView {
             }
 
         case .ended, .cancelled:
-            // Notify sync if a node was being dragged
-            if let nodeIndex = draggingNodeIndex {
-                onNodeUpdated?(nodes[nodeIndex])
+            // Announce the drag once, on release, rather than every frame.
+            // Read back by id: the index may no longer point where it did.
+            if let nodeIndex = draggingNodeIndex,
+               nodeIndex < nodes.count,
+               let moved = canvas.node(withId: nodes[nodeIndex].id) {
+                onNodeUpdated?(moved)
             }
             draggingNodeIndex = nil
 
