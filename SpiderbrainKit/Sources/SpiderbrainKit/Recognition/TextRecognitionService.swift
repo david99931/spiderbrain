@@ -1,3 +1,4 @@
+#if os(iOS)
 import Vision
 import UIKit
 import Foundation
@@ -118,3 +119,4 @@ public class TextRecognitionService {
         }
     }
 }
+#endif

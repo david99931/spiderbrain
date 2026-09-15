@@ -32,11 +32,15 @@ public final class MetalInkView: UIView {
     private var displayLink: CADisplayLink?
 
     // MARK: - Data Storage
-    // Note: These are the actual data stores. Managers were an over-optimization
-    // that broke mutability. Keeping it simple with direct arrays.
-    private var strokes: [Stroke] = []
-    private var nodes: [Node] = []
-    private var connections: [Connection] = []
+
+    /// Owns the canvas — strokes, nodes and connections. Every mutation goes
+    /// through this; the properties below are read-only views of its contents.
+    private let canvas = CanvasCommandExecutor()
+
+    /// Read-only views. Mutate via `canvas.execute`.
+    private var strokes: [Stroke] { canvas.strokes }
+    private var nodes: [Node] { canvas.nodes }
+    private var connections: [Connection] { canvas.connections }
 
     private var committedVertices: [InkVertex] = []
     private var needsRedraw = true
@@ -101,10 +105,14 @@ public final class MetalInkView: UIView {
     }
 
     /// M2 prototype: Callback when a closed shape is detected (auto-node suggestion).
-    public var onClosedShapeDetected: ((Int) -> Void)?  // Passes stroke index
+    /// Passes the id of the closed-shape stroke. Identity rather than position,
+    /// because the receiver queues this across user interaction and the stroke
+    /// array can change in the meantime.
+    public var onClosedShapeDetected: ((UUID) -> Void)?
 
     /// M2 prototype: Callback when a closed shape contains nodes (for absorb choice).
-    public var onClosedShapeWithNodes: ((Int, [Int]) -> Void)?  // Passes stroke index and node indices
+    /// Passes the closed-shape stroke id and the ids of the nodes it encloses.
+    public var onClosedShapeWithNodes: ((UUID, [UUID]) -> Void)?
 
     /// M2 prototype: Callback when lasso selects a node (for absorb/separate choice).
     public var onNodeLassoed: ((UUID, [Stroke]) -> Void)?  // Passes node ID and selected strokes
@@ -270,6 +278,15 @@ public final class MetalInkView: UIView {
 
     // MARK: - Touches
 
+    /// Whether a touch should draw ink.
+    ///
+    /// Apple Pencil on iPad, and trackpad or mouse when the app runs on a Mac.
+    /// A pointer reports no force, so `StrokeInputCollector` gives it a fixed
+    /// mid-pressure and strokes come out at an even width.
+    private func isDrawingTouch(_ touch: UITouch) -> Bool {
+        touch.type == .pencil || touch.type == .indirectPointer
+    }
+
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first else { return }
 
@@ -316,8 +333,7 @@ public final class MetalInkView: UIView {
             return
         }
 
-        // Only accept Apple Pencil touches for drawing
-        guard touch.type == .pencil else { return }
+        guard isDrawingTouch(touch) else { return }
 
         switch drawMode {
         case .draw:
@@ -353,8 +369,7 @@ public final class MetalInkView: UIView {
             return
         }
 
-        // Only accept Apple Pencil touches for drawing
-        guard touch.type == .pencil else { return }
+        guard isDrawingTouch(touch) else { return }
 
         switch drawMode {
         case .draw:
@@ -390,8 +405,7 @@ public final class MetalInkView: UIView {
             return
         }
 
-        // Only accept Apple Pencil touches for drawing
-        guard touch.type == .pencil else { return }
+        guard isDrawingTouch(touch) else { return }
 
         switch drawMode {
         case .draw:
@@ -465,7 +479,7 @@ public final class MetalInkView: UIView {
 
         // Normal stroke creation (not a connection)
         let stroke = Stroke(points: worldPoints, style: style)
-        strokes.append(stroke)
+        canvas.execute(.addStroke(stroke), origin: .local)
 
         // Notify sync that a stroke was committed
         onStrokeCommitted?(stroke)
@@ -479,22 +493,17 @@ public final class MetalInkView: UIView {
 
         // M2 prototype: Auto-detect closed shapes for node creation
         if drawMode == .draw && isClosedShape(stroke) {
-            let strokeIndex = strokes.count - 1
-
             // Check if there are nodes inside this closed shape
             let boundaryPolygon = stroke.points.map { $0.position }
-            var containedNodeIndices: [Int] = []
-            for (i, node) in nodes.enumerated() {
-                if pointInPolygon(node.bounds.center, polygon: boundaryPolygon) {
-                    containedNodeIndices.append(i)
-                }
-            }
+            let containedNodeIds = nodes
+                .filter { pointInPolygon($0.bounds.center, polygon: boundaryPolygon) }
+                .map(\.id)
 
             // Call appropriate callback based on whether nodes are inside
-            if !containedNodeIndices.isEmpty {
-                onClosedShapeWithNodes?(strokeIndex, containedNodeIndices)
+            if !containedNodeIds.isEmpty {
+                onClosedShapeWithNodes?(stroke.id, containedNodeIds)
             } else {
-                onClosedShapeDetected?(strokeIndex)
+                onClosedShapeDetected?(stroke.id)
             }
         }
 
@@ -578,20 +587,23 @@ public final class MetalInkView: UIView {
 
     // MARK: - Node Interaction
 
-    /// Convert a stroke at the given index into a node.
+    /// Convert the stroke with the given id into a node.
     /// The stroke is treated as a boundary shape - any strokes inside it are included in the node.
     /// The boundary stroke itself is replaced with a clean rectangle outline.
     /// If there are nodes inside, creates an empty node (no auto-absorb of nodes).
-    /// Convert a stroke to a node, creating an empty container.
-    public func convertStrokeToNode(at index: Int) {
-        guard index >= 0 && index < strokes.count else { return }
+    ///
+    /// Takes an id rather than an index because callers queue this across user
+    /// interaction, during which the stroke array can change.
+    public func convertStrokeToNode(strokeId: UUID) {
+        guard let index = strokes.firstIndex(where: { $0.id == strokeId }) else {
+            print("⚠️ convertStrokeToNode: stroke \(strokeId) no longer exists")
+            return
+        }
 
         let boundaryStroke = strokes[index]
 
-        // Validate this is actually a closed shape
-        // If not, the index might be stale, so don't proceed
         guard isClosedShape(boundaryStroke) else {
-            print("⚠️ Stroke at index \(index) is not a closed shape, index may be stale")
+            print("⚠️ convertStrokeToNode: stroke \(strokeId) is not a closed shape")
             return
         }
 
@@ -628,8 +640,6 @@ public final class MetalInkView: UIView {
             node = Node(strokes: [], bounds: bounds, boundaryStroke: boundaryStroke)
         }
 
-        nodes.append(node)
-
         // Collect stroke IDs BEFORE removing them
         var deletedStrokeIds: [UUID] = []
         for i in indicesToRemove {
@@ -638,15 +648,8 @@ public final class MetalInkView: UIView {
             }
         }
 
-        print("🗑 convertStrokeToNode: deleting \(deletedStrokeIds.count) strokes: \(deletedStrokeIds)")
-
-        // Remove all strokes (boundary + contained) from the main list
-        // Sort indices in descending order to avoid index shifting during removal
-        for i in indicesToRemove.sorted(by: >) {
-            if i >= 0 && i < strokes.count {
-                strokes.remove(at: i)
-            }
-        }
+        // One command: the node appears and its strokes leave the canvas together.
+        canvas.execute(.createNode(node, consumingStrokes: deletedStrokeIds), origin: .local)
 
         // Notify sync about node creation with stroke deletions in one atomic message
         onNodeCreatedWithStrokeDeletions?(node, deletedStrokeIds)
@@ -658,8 +661,13 @@ public final class MetalInkView: UIView {
     }
 
     /// Convert a stroke to a node and absorb all nodes inside it.
-    public func convertStrokeToNodeWithAbsorb(at index: Int) {
-        guard index >= 0 && index < strokes.count else { return }
+    ///
+    /// Takes an id rather than an index for the same reason as `convertStrokeToNode`.
+    public func convertStrokeToNodeWithAbsorb(strokeId: UUID) {
+        guard let index = strokes.firstIndex(where: { $0.id == strokeId }) else {
+            print("⚠️ convertStrokeToNodeWithAbsorb: stroke \(strokeId) no longer exists")
+            return
+        }
 
         let boundaryStroke = strokes[index]
 
@@ -693,109 +701,40 @@ public final class MetalInkView: UIView {
 
         // Create merged node with all strokes
         // If there are no strokes, use the boundary stroke itself to compute bounds
-        var mergedNodeId: UUID?
-        var newNode: Node?
-        if let bounds = Node.computeBounds(allStrokes.isEmpty ? [boundaryStroke] : allStrokes) {
-            let node = Node(strokes: allStrokes, bounds: bounds, boundaryStroke: boundaryStroke)
-            mergedNodeId = node.id
-            newNode = node
-            nodes.append(node)
+        guard let bounds = Node.computeBounds(allStrokes.isEmpty ? [boundaryStroke] : allStrokes) else {
+            return
         }
+        let mergedNode = Node(strokes: allStrokes, bounds: bounds, boundaryStroke: boundaryStroke)
 
-        // Handle connections if we absorbed any nodes
-        if !enclosedNodeIds.isEmpty {
-            // Collect node IDs before removal for sync
-            let deletedNodeIds = nodesToRemove.map { nodes[$0].id }
+        let deletedStrokeIds = indicesToRemove
+            .filter { $0 >= 0 && $0 < strokes.count }
+            .map { strokes[$0].id }
 
-            // Remove absorbed nodes (in reverse order)
-            for i in nodesToRemove.sorted(by: >) {
-                nodes.remove(at: i)
-            }
+        // One atomic command. The executor deletes the strokes, removes the absorbed
+        // nodes, adds the merged node, and re-points the absorbed nodes' external
+        // edges at it — so a peer never observes the canvas mid-merge.
+        let effects = canvas.execute(
+            .mergeNodes(
+                absorbing: Array(enclosedNodeIds),
+                into: mergedNode,
+                consumingStrokes: deletedStrokeIds
+            ),
+            origin: .local
+        )
 
-            // Notify sync about deleted nodes
-            for nodeId in deletedNodeIds {
-                onNodeDeleted?(nodeId)
-            }
-
-            // Collect external connections before removing nodes
-            var externalOutgoingTargets = Set<UUID>()
-            var externalIncomingSources = Set<UUID>()
-
-            for conn in connections {
-                // Outgoing: enclosed → external
-                if enclosedNodeIds.contains(conn.from) && !enclosedNodeIds.contains(conn.to) {
-                    externalOutgoingTargets.insert(conn.to)
-                }
-                // Incoming: external → enclosed
-                if !enclosedNodeIds.contains(conn.from) && enclosedNodeIds.contains(conn.to) {
-                    externalIncomingSources.insert(conn.from)
-                }
-            }
-
-            // Remove ALL connections involving enclosed nodes
-            connections.removeAll { conn in
-                enclosedNodeIds.contains(conn.from) || enclosedNodeIds.contains(conn.to)
-            }
-
-            // Remove from nodes' connection arrays
-            for nodeId in enclosedNodeIds {
-                for i in nodes.indices {
-                    nodes[i].connections.removeAll { $0 == nodeId }
-                }
-            }
-
-            // Create new connections from merged node to external nodes
-            if let mergedId = mergedNodeId, let mergedIndex = nodes.firstIndex(where: { $0.id == mergedId }) {
-                // Add outgoing connections (merged → external)
-                for targetId in externalOutgoingTargets {
-                    let connection = Connection(from: mergedId, to: targetId)
-                    connections.append(connection)
-                    if !nodes[mergedIndex].connections.contains(targetId) {
-                        nodes[mergedIndex].connections.append(targetId)
-                    }
-                }
-
-                // Add incoming connections (external → merged)
-                for sourceId in externalIncomingSources {
-                    let connection = Connection(from: sourceId, to: mergedId)
-                    connections.append(connection)
-                    // Also update the source node's connections array
-                    if let sourceIndex = nodes.firstIndex(where: { $0.id == sourceId }) {
-                        if !nodes[sourceIndex].connections.contains(mergedId) {
-                            nodes[sourceIndex].connections.append(mergedId)
-                        }
-                    }
-                }
-
-                // Sync updates to external nodes that now have connections to the merged node
-                for sourceId in externalIncomingSources {
-                    if let sourceNode = nodes.first(where: { $0.id == sourceId }) {
-                        onNodeUpdated?(sourceNode)
-                    }
-                }
-
-                // Update newNode to reference the updated node with connections
-                newNode = nodes.first(where: { $0.id == mergedId })
-            }
-        } else {
-            // No nodes to absorb, just remove absorbed nodes if any
-            for i in nodesToRemove.sorted(by: >) {
-                nodes.remove(at: i)
-            }
+        // Broadcast order matters. A peer applies `connect` only when both endpoints
+        // already exist, and nothing retries a rejected edge — so the merged node
+        // has to be announced before any edge that points at it.
+        for case .nodesRemoved(let ids) in effects {
+            for id in ids { onNodeDeleted?(id) }
         }
-
-        // Remove all strokes from the main list and sync deletions
-        var deletedStrokeIds: [UUID] = []
-        for i in indicesToRemove.sorted(by: >) {
-            deletedStrokeIds.append(strokes[i].id)
-            strokes.remove(at: i)
-        }
-
-        print("🗑 convertStrokeToNodeWithAbsorb: deleting \(deletedStrokeIds.count) strokes: \(deletedStrokeIds)")
 
         // Notify sync about node creation with stroke deletions in one atomic message
-        if let node = newNode {
-            onNodeCreatedWithStrokeDeletions?(node, deletedStrokeIds)
+        onNodeCreatedWithStrokeDeletions?(mergedNode, deletedStrokeIds)
+
+        // Now the merged node exists on the peer, so the rewired edges will land.
+        for case .connectionAdded(let connection) in effects {
+            onConnectionCreated?(connection)
         }
 
         // Rebuild geometry
@@ -914,15 +853,16 @@ public final class MetalInkView: UIView {
 
         // Absorb the strokes into the node (keep original bounds)
         if !strokesToAbsorb.isEmpty {
-            nodes[nodeIndex].strokes.append(contentsOf: strokesToAbsorb)
-            // Debug logging - uncomment if needed
-            // print("🟠 [MetalInkView] After append: nodes[\(nodeIndex)] has \(nodes[nodeIndex].strokes.count) strokes")
-
             // Don't clear recognized text - let user re-recognize manually to add new words
             // This way "david" stays, and clicking recognize again will find "david hello"
-
             // Don't recalculate bounds - keep the original circle size
-            strokes = remainingStrokes
+            var absorbing = nodes[nodeIndex]
+            absorbing.strokes.append(contentsOf: strokesToAbsorb)
+            canvas.execute(.updateNode(absorbing), origin: .local)
+            canvas.execute(
+                .deleteStrokes(ids: strokesToAbsorb.map(\.id)),
+                origin: .local
+            )
 
             // Notify sync about deleted strokes
             for stroke in strokesToAbsorb {
@@ -930,7 +870,7 @@ public final class MetalInkView: UIView {
             }
 
             // Notify sync about updated node
-            onNodeUpdated?(nodes[nodeIndex])
+            onNodeUpdated?(absorbing)
 
             rebuildCommittedGeometry()
             needsRedraw = true
@@ -966,11 +906,13 @@ public final class MetalInkView: UIView {
             }
 
             // Update node with recognized text
-            nodes[nodeIndex].recognizedText = RecognizedText(
+            guard var node = canvas.node(withId: nodeId) else { return }
+            node.recognizedText = RecognizedText(
                 text: text,
                 confidence: confidence,
                 source: sourceData
             )
+            canvas.execute(.updateNode(node), origin: .local)
 
             // Notify UI
             onNodesChanged?(nodes)
@@ -980,26 +922,17 @@ public final class MetalInkView: UIView {
         }
     }
 
-    /// Delete a node by its ID.
+    /// Delete a node by its ID, returning its strokes to the canvas.
     public func deleteNode(id nodeId: UUID) {
-        if let index = nodes.firstIndex(where: { $0.id == nodeId }) {
-            // Get the strokes from the node and add them back to the canvas
-            let nodeStrokes = nodes[index].strokes
-            strokes.append(contentsOf: nodeStrokes)
+        // The executor returns the strokes and drops the node's edges in one step.
+        let effects = canvas.execute(.deleteNode(id: nodeId, returningStrokes: true), origin: .local)
+        guard !effects.isEmpty else { return }
 
-            // Remove the node
-            nodes.remove(at: index)
+        onNodeDeleted?(nodeId)
 
-            // Notify sync that a node was deleted
-            onNodeDeleted?(nodeId)
-
-            // Remove all connections to/from this node
-            removeAllConnections(for: nodeId)
-
-            // Rebuild geometry
-            rebuildCommittedGeometry()
-            needsRedraw = true
-        }
+        // Rebuild geometry
+        rebuildCommittedGeometry()
+        needsRedraw = true
     }
 
     // MARK: - Node Resize
@@ -1097,8 +1030,10 @@ public final class MetalInkView: UIView {
         }
 
         // Update node
-        nodes[nodeIndex].strokes = scaledStrokes
-        nodes[nodeIndex].bounds = newBounds
+        var resized = nodes[nodeIndex]
+        resized.strokes = scaledStrokes
+        resized.bounds = newBounds
+        canvas.execute(.updateNode(resized), origin: .local)
 
         // Rebuild geometry
         rebuildCommittedGeometry()
@@ -1183,10 +1118,10 @@ public final class MetalInkView: UIView {
         // Create a node from the selected strokes
         if let bounds = Node.computeBounds(selectedStrokes) {
             let node = Node(strokes: selectedStrokes, bounds: bounds)
-            nodes.append(node)
-
-            // Remove selected strokes from the main stroke list
-            strokes = remainingStrokes
+            canvas.execute(
+                .createNode(node, consumingStrokes: selectedStrokes.map(\.id)),
+                origin: .local
+            )
 
             // Rebuild committed vertices without the selected strokes
             rebuildCommittedGeometry()
@@ -1221,28 +1156,30 @@ public final class MetalInkView: UIView {
             }
         }
 
-        // Add strokes to the target node
-        nodes[nodeIndex].strokes.append(contentsOf: strokesToAbsorb)
-
-        // Recalculate bounds to encompass all strokes in the node
-        if let newBounds = Node.computeBounds(nodes[nodeIndex].strokes) {
-            nodes[nodeIndex].bounds = newBounds
+        // Build the absorbed node: existing strokes plus the newly absorbed ones.
+        var absorbedNode = nodes[nodeIndex]
+        absorbedNode.strokes.append(contentsOf: strokesToAbsorb)
+        if let newBounds = Node.computeBounds(absorbedNode.strokes) {
+            absorbedNode.bounds = newBounds
         }
 
-        // Handle connections for absorbed nodes
-        // Remove all connections involving the absorbed node
-        // Do this BEFORE removing the nodes so removeAllConnections can access them
-        for index in nodesToRemove {
-            let absorbedNodeId = nodes[index].id
-            removeAllConnections(for: absorbedNodeId)
-        }
-
-        // Collect node IDs before removal for sync
         let deletedNodeIds = nodesToRemove.map { nodes[$0].id }
 
-        // Remove absorbed nodes (in reverse order to avoid index shifting)
-        for index in nodesToRemove.sorted(by: >) {
-            nodes.remove(at: index)
+        var rewiredConnections: [Connection] = []
+        if deletedNodeIds.isEmpty {
+            canvas.execute(.updateNode(absorbedNode), origin: .local)
+        } else {
+            // Nodes are being swallowed, so this is a merge: the executor removes
+            // them and re-points their external edges at the surviving node.
+            let effects = canvas.execute(
+                .mergeNodes(absorbing: deletedNodeIds + [absorbedNode.id],
+                            into: absorbedNode,
+                            consumingStrokes: []),
+                origin: .local
+            )
+            for case .connectionAdded(let connection) in effects {
+                rewiredConnections.append(connection)
+            }
         }
 
         // Notify sync about deleted nodes
@@ -1251,26 +1188,26 @@ public final class MetalInkView: UIView {
         }
 
         // Remove these strokes from the main canvas
-        var remainingStrokes: [Stroke] = []
-        var absorbedStrokeIds: [UUID] = []
-        for stroke in strokes {
-            // Check if this stroke is one we're absorbing
-            let isAbsorbed = strokeIdentifiers.contains(StrokeIdentifier(stroke: stroke))
-            if !isAbsorbed {
-                remainingStrokes.append(stroke)
-            } else {
-                absorbedStrokeIds.append(stroke.id)
-            }
-        }
-        strokes = remainingStrokes
+        let absorbedStrokeIds = strokes
+            .filter { strokeIdentifiers.contains(StrokeIdentifier(stroke: $0)) }
+            .map(\.id)
+        canvas.execute(.deleteStrokes(ids: absorbedStrokeIds), origin: .local)
 
         // Notify sync about deleted strokes
         for strokeId in absorbedStrokeIds {
             onStrokeDeleted?(strokeId)
         }
 
-        // Notify sync about updated node
-        onNodeUpdated?(nodes[nodeIndex])
+        // Notify sync about the surviving node. Read it back by id: the merge
+        // rebuilt the array, so nodeIndex no longer points where it did.
+        if let survivor = canvas.node(withId: absorbedNode.id) {
+            onNodeUpdated?(survivor)
+        }
+
+        // Only now that the peer has the surviving node do the rewired edges land.
+        for connection in rewiredConnections {
+            onConnectionCreated?(connection)
+        }
 
         rebuildCommittedGeometry()
         needsRedraw = true
@@ -1283,23 +1220,22 @@ public final class MetalInkView: UIView {
 
         if let bounds = Node.computeBounds(strokesToSeparate) {
             let node = Node(strokes: strokesToSeparate, bounds: bounds)
-            nodes.append(node)
 
-            // Remove these strokes from the main canvas
-            var remainingStrokes: [Stroke] = []
+            // Work out which canvas strokes the new node swallows.
             var separatedStrokeIds: [UUID] = []
             for stroke in strokes {
                 let isSeparated = strokesToSeparate.contains { separatedStroke in
                     separatedStroke.points.count == stroke.points.count &&
                     separatedStroke.points.first?.position == stroke.points.first?.position
                 }
-                if !isSeparated {
-                    remainingStrokes.append(stroke)
-                } else {
+                if isSeparated {
                     separatedStrokeIds.append(stroke.id)
                 }
             }
-            strokes = remainingStrokes
+            canvas.execute(
+                .createNode(node, consumingStrokes: separatedStrokeIds),
+                origin: .local
+            )
 
             // Notify sync about deleted strokes
             for strokeId in separatedStrokeIds {
@@ -1528,9 +1464,11 @@ public final class MetalInkView: UIView {
     }
 
     public func clear() {
-        strokes.removeAll()
-        nodes.removeAll()
-        connections.removeAll()
+        // Local-only. Clearing wipes strokes, nodes and connections, and the wire
+        // protocol has no atomic "clear canvas" message — syncing it as hundreds of
+        // individual deletions would be non-atomic and could leave a peer showing a
+        // half-cleared canvas. Revisit once nodes and connections have executors.
+        canvas.execute(.clearCanvas, origin: .local)
         committedVertices.removeAll()
         renderer.setCommittedGeometry([])
         renderer.setLiveGeometry([])
@@ -1539,8 +1477,16 @@ public final class MetalInkView: UIView {
     }
 
     public func undoLastStroke() {
-        guard !strokes.isEmpty else { return }
-        strokes.removeLast()
+        let effects = canvas.execute(.removeLastStroke, origin: .local)
+
+        // Sync each removal. The executor reports only strokes that were really
+        // there, so an undo on an empty canvas broadcasts nothing.
+        for case .strokesRemoved(let ids) in effects {
+            for id in ids {
+                onStrokeDeleted?(id)
+            }
+        }
+
         // Rebuild from the surviving strokes
         rebuildCommittedGeometry()
         needsRedraw = true
@@ -1548,12 +1494,13 @@ public final class MetalInkView: UIView {
 
     /// Add a stroke received from a peer (for sync).
     public func addReceivedStroke(_ stroke: Stroke) {
-        // Check for duplicates (can happen with multiple peer connections)
-        guard !strokes.contains(where: { $0.id == stroke.id }) else {
+        // The executor is idempotent by stroke id, so duplicates arriving over
+        // multiple peer connections are dropped here rather than at each call site.
+        let effects = canvas.execute(.addStroke(stroke), origin: .remote)
+        guard !effects.isEmpty else {
             print("⚠️ addReceivedStroke: ignoring duplicate stroke \(stroke.id)")
             return
         }
-        strokes.append(stroke)
         // Rebuild geometry to include the new stroke
         rebuildCommittedGeometry()
         needsRedraw = true
@@ -1561,48 +1508,23 @@ public final class MetalInkView: UIView {
 
     /// Delete a stroke received from a peer (for sync).
     public func deleteReceivedStroke(id: UUID) {
-        guard let index = strokes.firstIndex(where: { $0.id == id }) else {
+        let effects = canvas.execute(.deleteStrokes(ids: [id]), origin: .remote)
+        guard !effects.isEmpty else {
             print("⚠️ deleteReceivedStroke: stroke \(id) not found in \(strokes.count) strokes")
             return
         }
-        print("✅ deleteReceivedStroke: deleting stroke \(id) at index \(index)")
-        strokes.remove(at: index)
+        print("✅ deleteReceivedStroke: deleted stroke \(id)")
         rebuildCommittedGeometry()
         needsRedraw = true
     }
 
     /// Add a node received from a peer (for sync).
+    ///
+    /// Edges arrive as their own messages rather than being reconstructed from the
+    /// node, so there is nothing to reconcile here.
     public func addReceivedNode(_ node: Node) {
-        // Check if node already exists (avoid duplicates)
-        guard !nodes.contains(where: { $0.id == node.id }) else { return }
-        nodes.append(node)
-
-        // Create Connection objects from the node's connections array (outgoing connections)
-        print("📥 addReceivedNode(\(node.id)) with node.connections=\(node.connections)")
-        for targetId in node.connections {
-            // Only create if both nodes exist and connection doesn't already exist
-            if nodes.contains(where: { $0.id == targetId }) &&
-               !connections.contains(where: { $0.from == node.id && $0.to == targetId }) {
-                let connection = Connection(from: node.id, to: targetId)
-                connections.append(connection)
-                print("🔗 Created outgoing connection: \(node.id) → \(targetId)")
-            } else if !nodes.contains(where: { $0.id == targetId }) {
-                print("⚠️ Target node \(targetId) not found yet")
-            }
-        }
-
-        // Also check if any OTHER nodes point to this new node (incoming connections)
-        for otherNode in nodes where otherNode.id != node.id {
-            if otherNode.connections.contains(node.id) {
-                // This node points to us - create the connection if it doesn't exist
-                if !connections.contains(where: { $0.from == otherNode.id && $0.to == node.id }) {
-                    let connection = Connection(from: otherNode.id, to: node.id)
-                    connections.append(connection)
-                    print("🔗 Created incoming connection: \(otherNode.id) → \(node.id)")
-                }
-            }
-        }
-        print("📊 After addReceivedNode(\(node.id)): total connections = \(connections.count)")
+        let effects = canvas.execute(.createNode(node, consumingStrokes: []), origin: .remote)
+        guard !effects.isEmpty else { return }
 
         onNodesChanged?(nodes)
         rebuildCommittedGeometry()
@@ -1611,34 +1533,8 @@ public final class MetalInkView: UIView {
 
     /// Update a node received from a peer (for sync).
     public func updateReceivedNode(_ node: Node) {
-        guard let index = nodes.firstIndex(where: { $0.id == node.id }) else { return }
-        nodes[index] = node
-
-        // Rebuild Connection objects from the node's updated connections array
-        // First remove old connections FROM this node
-        connections.removeAll { $0.from == node.id }
-
-        // Then create new connections based on updated connections array
-        for targetId in node.connections {
-            // Create connection if both source and target nodes exist
-            if nodes.contains(where: { $0.id == targetId }) {
-                let connection = Connection(from: node.id, to: targetId)
-                connections.append(connection)
-            }
-            // Note: If target doesn't exist yet, the connection will be created
-            // when that node is received and addReceivedNode checks for incoming connections
-        }
-
-        // Also check if any OTHER nodes point to this node, and create those connections
-        for otherNode in nodes where otherNode.id != node.id {
-            if otherNode.connections.contains(node.id) {
-                // This node points to us - create the connection if it doesn't exist
-                if !connections.contains(where: { $0.from == otherNode.id && $0.to == node.id }) {
-                    let connection = Connection(from: otherNode.id, to: node.id)
-                    connections.append(connection)
-                }
-            }
-        }
+        let effects = canvas.execute(.updateNode(node), origin: .remote)
+        guard !effects.isEmpty else { return }
 
         onNodesChanged?(nodes)
         rebuildCommittedGeometry()
@@ -1646,43 +1542,29 @@ public final class MetalInkView: UIView {
     }
 
     /// Delete a node received from a peer (for sync).
+    ///
+    /// The executor drops any edges touching the node, so a peer deleting a node
+    /// cleans up its arrows without a separate message.
     public func deleteReceivedNode(id: UUID) {
-        guard let index = nodes.firstIndex(where: { $0.id == id }) else { return }
+        let effects = canvas.execute(.deleteNode(id: id, returningStrokes: false), origin: .remote)
+        guard !effects.isEmpty else { return }
 
-        // Clean up all connections to/from this node (without syncing since we're receiving)
-        let connectionsToRemove = connections.filter { $0.from == id || $0.to == id }
-        connections.removeAll { $0.from == id || $0.to == id }
-
-        // Remove from all nodes' connection lists
-        for i in nodes.indices {
-            nodes[i].connections.removeAll { $0 == id }
-        }
-
-        nodes.remove(at: index)
         onNodesChanged?(nodes)
         rebuildCommittedGeometry()
         needsRedraw = true
     }
 
     /// Add a connection received from a peer (for sync).
+    ///
+    /// Dropped if either endpoint is missing, since the arrow would have nothing to
+    /// draw between. Nothing retries a dropped edge, so senders must announce a node
+    /// before any edge that points at it.
     public func addReceivedConnection(_ connection: Connection) {
-        // Don't add if it already exists
-        guard !connections.contains(where: { $0.id == connection.id }) else { return }
-
-        // Verify both nodes exist
-        guard nodes.contains(where: { $0.id == connection.from }),
-              nodes.contains(where: { $0.id == connection.to }) else {
-            return
-        }
-
-        connections.append(connection)
-
-        // Update source node's connections array
-        if let index = nodes.firstIndex(where: { $0.id == connection.from }) {
-            if !nodes[index].connections.contains(connection.to) {
-                nodes[index].connections.append(connection.to)
-            }
-        }
+        let effects = canvas.execute(
+            .connect(from: connection.from, to: connection.to),
+            origin: .remote
+        )
+        guard !effects.isEmpty else { return }
 
         rebuildCommittedGeometry()
         needsRedraw = true
@@ -1690,14 +1572,8 @@ public final class MetalInkView: UIView {
 
     /// Delete a connection received from a peer (for sync).
     public func deleteReceivedConnection(id: UUID) {
-        guard let index = connections.firstIndex(where: { $0.id == id }) else { return }
-        let connection = connections[index]
-        connections.remove(at: index)
-
-        // Update source node's connections array
-        if let nodeIndex = nodes.firstIndex(where: { $0.id == connection.from }) {
-            nodes[nodeIndex].connections.removeAll { $0 == connection.to }
-        }
+        let effects = canvas.execute(.disconnect(id: id), origin: .remote)
+        guard !effects.isEmpty else { return }
 
         rebuildCommittedGeometry()
         needsRedraw = true
@@ -1706,85 +1582,48 @@ public final class MetalInkView: UIView {
     // MARK: - Connection Management
 
     /// Add a connection from one node to another. Returns true if added, false if rejected.
-    /// Rejects self-loops (from == to) and duplicate connections.
+    /// Rejects self-loops, duplicates, and edges to nodes that don't exist.
     @discardableResult
     public func addConnection(from sourceId: UUID, to targetId: UUID) -> Bool {
-        // Reject self-loops
-        guard sourceId != targetId else { return false }
+        let effects = canvas.execute(.connect(from: sourceId, to: targetId), origin: .local)
+        guard !effects.isEmpty else { return false }
 
-        // Reject if connection already exists
-        if connections.contains(where: { $0.from == sourceId && $0.to == targetId }) {
-            return false
+        for case .connectionAdded(let connection) in effects {
+            onConnectionCreated?(connection)
         }
-
-        // Verify both nodes exist
-        guard nodes.contains(where: { $0.id == sourceId }),
-              nodes.contains(where: { $0.id == targetId }) else {
-            return false
-        }
-
-        // Create connection
-        let connection = Connection(from: sourceId, to: targetId)
-        connections.append(connection)
-
-        // Update source node's connections array
-        if let index = nodes.firstIndex(where: { $0.id == sourceId }) {
-            if !nodes[index].connections.contains(targetId) {
-                nodes[index].connections.append(targetId)
-            }
-        }
-
-        // Notify sync about connection creation
-        onConnectionCreated?(connection)
 
         return true
     }
 
     /// Remove a connection by its ID.
     public func removeConnection(id: UUID) {
-        guard let index = connections.firstIndex(where: { $0.id == id }) else { return }
-        let connection = connections[index]
-        connections.remove(at: index)
-
-        // Update source node's connections array
-        if let nodeIndex = nodes.firstIndex(where: { $0.id == connection.from }) {
-            nodes[nodeIndex].connections.removeAll { $0 == connection.to }
-        }
+        let effects = canvas.execute(.disconnect(id: id), origin: .local)
+        guard !effects.isEmpty else { return }
 
         // Clear selection if this connection was selected
         if selectedConnectionId == id {
             selectedConnectionId = nil
         }
 
-        // Notify sync about connection deletion
-        onConnectionDeleted?(id)
+        for case .connectionsRemoved(let ids) in effects {
+            for removedId in ids {
+                onConnectionDeleted?(removedId)
+            }
+        }
 
         // Rebuild geometry to remove the arrow
         rebuildCommittedGeometry()
         needsRedraw = true
     }
 
-    /// Remove all connections to/from a specific node.
-    /// Called when deleting a node - the node deletion itself will be synced,
-    /// and the peer will clean up connections when it receives the node deletion.
-    public func removeAllConnections(for nodeId: UUID) {
-        // Remove from connections array
-        connections.removeAll { $0.from == nodeId || $0.to == nodeId }
-
-        // Remove from all nodes' connection lists
-        for i in nodes.indices {
-            nodes[i].connections.removeAll { $0 == nodeId }
-        }
-    }
-
     /// Get all connections where this node is the source.
     public func outgoingConnections(from nodeId: UUID) -> [Connection] {
-        return connections.filter { $0.from == nodeId }
+        return canvas.outgoingConnections(from: nodeId)
     }
 
     /// Get all connections where this node is the target.
     public func incomingConnections(to nodeId: UUID) -> [Connection] {
-        return connections.filter { $0.to == nodeId }
+        return canvas.incomingConnections(to: nodeId)
     }
 
     // MARK: - Frame
@@ -1874,20 +1713,20 @@ public final class MetalInkView: UIView {
 
                 // Calculate new center accounting for drag offset
                 let newCenter = worldPoint - dragOffset
-                let currentCenter = nodes[nodeIndex].bounds.center
-                let delta = newCenter - currentCenter
+                var dragged = nodes[nodeIndex]
+                let delta = newCenter - dragged.bounds.center
 
-                // Move the node by updating its bounds
-                nodes[nodeIndex].bounds.x += delta.x
-                nodes[nodeIndex].bounds.y += delta.y
-
-                // Also move all strokes inside the node
-                for i in 0..<nodes[nodeIndex].strokes.count {
-                    for j in 0..<nodes[nodeIndex].strokes[i].points.count {
-                        nodes[nodeIndex].strokes[i].points[j].position =
-                            nodes[nodeIndex].strokes[i].points[j].position + delta
+                // Move the node and the strokes inside it, then write it back.
+                // Not synced per frame: one update goes out on release.
+                dragged.bounds.x += delta.x
+                dragged.bounds.y += delta.y
+                for i in dragged.strokes.indices {
+                    for j in dragged.strokes[i].points.indices {
+                        dragged.strokes[i].points[j].position =
+                            dragged.strokes[i].points[j].position + delta
                     }
                 }
+                canvas.execute(.updateNode(dragged), origin: .local)
 
                 rebuildCommittedGeometry()
                 needsRedraw = true
@@ -1991,10 +1830,11 @@ extension MetalInkView: UIGestureRecognizerDelegate {
         return true
     }
 
-    /// Only allow finger touches for gestures, not the Pencil.
+    /// Only allow finger touches for gestures, not whatever is drawing.
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        // Pencil should not trigger pan/zoom gestures
-        if touch.type == .pencil {
+        // A drawing touch must not also pan or zoom, or a mouse drag on the Mac
+        // would draw and pan the camera at the same time.
+        if isDrawingTouch(touch) {
             return false
         }
 

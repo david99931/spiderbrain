@@ -1,3 +1,4 @@
+#if os(iOS)
 import UIKit
 import Foundation
 
@@ -157,3 +158,4 @@ public class StrokeImageRenderer {
         }
     }
 }
+#endif

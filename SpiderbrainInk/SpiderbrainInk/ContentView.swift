@@ -14,13 +14,15 @@ struct ContentView: View {
     @State private var undoToken = 0
 
     // M2 prototype: Auto-detection and sidebar state
-    @State private var queuedNodeIndices: [Int] = []
-    @State private var shapesWithNodes: [(strokeIndex: Int, nodeIndices: [Int])] = []
+    // Stroke and node identities, not array positions: these are held across user
+    // interaction, and the underlying arrays can change while a shape sits queued.
+    @State private var queuedStrokeIds: [UUID] = []
+    @State private var shapesWithNodes: [(strokeId: UUID, nodeIds: [UUID])] = []
     @State private var sidebarExpanded = false
     @State private var convertNodeToken = 0
-    @State private var convertNodeIndex: Int? = nil
+    @State private var convertStrokeId: UUID? = nil
     @State private var absorbNodeToken = 0
-    @State private var absorbNodeIndex: Int? = nil
+    @State private var absorbStrokeId: UUID? = nil
     @State private var existingNodes: [Node] = []
     @State private var refreshTrigger = 0
     @State private var detectNodeId: UUID? = nil
@@ -81,9 +83,9 @@ struct ContentView: View {
                         clearToken: clearToken,
                         undoToken: undoToken,
                         convertNodeToken: convertNodeToken,
-                        convertNodeIndex: convertNodeIndex,
+                        convertStrokeId: convertStrokeId,
                         absorbNodeToken: absorbNodeToken,
-                        absorbNodeIndex: absorbNodeIndex,
+                        absorbStrokeId: absorbStrokeId,
                         detectNodeId: detectNodeId,
                         detectToken: detectToken,
                         deleteNodeId: deleteNodeId,
@@ -116,7 +118,6 @@ struct ContentView: View {
                                     bounds: node.bounds,
                                     style: node.style,
                                     boundaryStroke: node.boundaryStroke,
-                                    connections: node.connections,
                                     recognizedText: node.recognizedText  // Include recognized text
                                 )
                             }
@@ -150,15 +151,15 @@ struct ContentView: View {
                                 // }
                             }
                         },
-                        onClosedShapeDetected: { strokeIndex in
+                        onClosedShapeDetected: { strokeId in
                             // Add to queue if not already there
-                            if !queuedNodeIndices.contains(strokeIndex) {
-                                queuedNodeIndices.append(strokeIndex)
+                            if !queuedStrokeIds.contains(strokeId) {
+                                queuedStrokeIds.append(strokeId)
                             }
                         },
-                        onClosedShapeWithNodes: { strokeIndex, nodeIndices in
+                        onClosedShapeWithNodes: { strokeId, nodeIds in
                             // Add to shapes with nodes queue
-                            shapesWithNodes.append((strokeIndex: strokeIndex, nodeIndices: nodeIndices))
+                            shapesWithNodes.append((strokeId: strokeId, nodeIds: nodeIds))
                         },
                         onNodeLassoed: { nodeId, strokes in
                             lasssoedNodeId = nodeId
@@ -283,7 +284,7 @@ struct ContentView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
                             // Node queue section
-                            if !queuedNodeIndices.isEmpty {
+                            if !queuedStrokeIds.isEmpty {
                                 VStack(alignment: .leading, spacing: 12) {
                                     HStack {
                                         Text("Detected Shapes")
@@ -292,7 +293,7 @@ struct ContentView: View {
 
                                         Spacer()
 
-                                        Text("\(queuedNodeIndices.count)")
+                                        Text("\(queuedStrokeIds.count)")
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                             .padding(.horizontal, 8)
@@ -302,29 +303,26 @@ struct ContentView: View {
                                     }
 
                                     // List of queued nodes
-                                    ForEach(Array(queuedNodeIndices.enumerated()), id: \.offset) { index, strokeIndex in
+                                    ForEach(Array(queuedStrokeIds.enumerated()), id: \.element) { index, strokeId in
                                         HStack(spacing: 12) {
                                             VStack(alignment: .leading, spacing: 4) {
                                                 Text("Shape \(index + 1)")
                                                     .font(.caption)
                                                     .fontWeight(.medium)
-                                                Text("Stroke #\(strokeIndex)")
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
                                             }
 
                                             Spacer()
 
                                             Button("Create") {
-                                                convertNodeIndex = strokeIndex
+                                                convertStrokeId = strokeId
                                                 convertNodeToken += 1
-                                                queuedNodeIndices.removeAll { $0 == strokeIndex }
+                                                queuedStrokeIds.removeAll { $0 == strokeId }
                                             }
                                             .buttonStyle(.borderedProminent)
                                             .controlSize(.small)
 
                                             Button(action: {
-                                                queuedNodeIndices.removeAll { $0 == strokeIndex }
+                                                queuedStrokeIds.removeAll { $0 == strokeId }
                                             }) {
                                                 Image(systemName: "xmark")
                                                     .font(.caption2)
@@ -340,20 +338,20 @@ struct ContentView: View {
                                     }
 
                                     // Batch actions
-                                    if queuedNodeIndices.count > 1 {
+                                    if queuedStrokeIds.count > 1 {
                                         HStack(spacing: 12) {
                                             Button("Create All") {
-                                                for strokeIndex in queuedNodeIndices.reversed() {
-                                                    convertNodeIndex = strokeIndex
+                                                for strokeId in queuedStrokeIds.reversed() {
+                                                    convertStrokeId = strokeId
                                                     convertNodeToken += 1
                                                 }
-                                                queuedNodeIndices.removeAll()
+                                                queuedStrokeIds.removeAll()
                                             }
                                             .buttonStyle(.borderedProminent)
                                             .controlSize(.small)
 
                                             Button("Dismiss All") {
-                                                queuedNodeIndices.removeAll()
+                                                queuedStrokeIds.removeAll()
                                             }
                                             .buttonStyle(.bordered)
                                             .controlSize(.small)
@@ -391,7 +389,7 @@ struct ContentView: View {
                                                 Text("Shape \(index + 1)")
                                                     .font(.caption)
                                                     .fontWeight(.medium)
-                                                Text("\(shape.nodeIndices.count) node\(shape.nodeIndices.count == 1 ? "" : "s") inside")
+                                                Text("\(shape.nodeIds.count) node\(shape.nodeIds.count == 1 ? "" : "s") inside")
                                                     .font(.caption2)
                                                     .foregroundStyle(.secondary)
                                             }
@@ -399,7 +397,7 @@ struct ContentView: View {
                                             Spacer()
 
                                             Button("Absorb") {
-                                                absorbNodeIndex = shape.strokeIndex
+                                                absorbStrokeId = shape.strokeId
                                                 absorbNodeToken += 1
                                                 shapesWithNodes.remove(at: index)
                                             }
@@ -407,7 +405,7 @@ struct ContentView: View {
                                             .controlSize(.small)
 
                                             Button("Create Empty") {
-                                                convertNodeIndex = shape.strokeIndex
+                                                convertStrokeId = shape.strokeId
                                                 convertNodeToken += 1
                                                 shapesWithNodes.remove(at: index)
                                             }
@@ -731,7 +729,7 @@ struct ContentView: View {
                             .padding(12)
 
                         // Badge for queued items or existing nodes
-                        let totalCount = queuedNodeIndices.count + existingNodes.count
+                        let totalCount = queuedStrokeIds.count + existingNodes.count
                         if totalCount > 0 {
                             Text("\(totalCount)")
                                 .font(.caption2)
@@ -1104,9 +1102,9 @@ private struct MetalInkCanvas: UIViewRepresentable {
     var clearToken: Int
     var undoToken: Int
     var convertNodeToken: Int
-    var convertNodeIndex: Int?
+    var convertStrokeId: UUID?
     var absorbNodeToken: Int
-    var absorbNodeIndex: Int?
+    var absorbStrokeId: UUID?
     var detectNodeId: UUID?
     var detectToken: Int
     var deleteNodeId: UUID?
@@ -1123,8 +1121,8 @@ private struct MetalInkCanvas: UIViewRepresentable {
     var onStats: (MetalInkView.HUDStats) -> Void
     var onNodesUpdate: ([Node]) -> Void
     var onNodesChanged: (([Node]) -> Void)?
-    var onClosedShapeDetected: ((Int) -> Void)?
-    var onClosedShapeWithNodes: ((Int, [Int]) -> Void)?
+    var onClosedShapeDetected: ((UUID) -> Void)?
+    var onClosedShapeWithNodes: ((UUID, [UUID]) -> Void)?
     var onNodeLassoed: ((UUID, [Stroke]) -> Void)?
     var onClearLassoState: (() -> Void)?
     var onNodeSelected: ((UUID?) -> Void)?
@@ -1207,9 +1205,9 @@ private struct MetalInkCanvas: UIViewRepresentable {
             view.undoLastStroke()
         }
         if context.coordinator.lastConvertNode != convertNodeToken,
-           let strokeIndex = convertNodeIndex {
+           let strokeId = convertStrokeId {
             context.coordinator.lastConvertNode = convertNodeToken
-            view.convertStrokeToNode(at: strokeIndex)
+            view.convertStrokeToNode(strokeId: strokeId)
         }
 
         // Handle detect strokes (one-time absorb)
@@ -1236,9 +1234,9 @@ private struct MetalInkCanvas: UIViewRepresentable {
 
         // Handle absorb nodes (from draw mode)
         if context.coordinator.lastAbsorbNode != absorbNodeToken,
-           let strokeIndex = absorbNodeIndex {
+           let strokeId = absorbStrokeId {
             context.coordinator.lastAbsorbNode = absorbNodeToken
-            view.convertStrokeToNodeWithAbsorb(at: strokeIndex)
+            view.convertStrokeToNodeWithAbsorb(strokeId: strokeId)
         }
 
         // Handle absorb (from lasso mode)

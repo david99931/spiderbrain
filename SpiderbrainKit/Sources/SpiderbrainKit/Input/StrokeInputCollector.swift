@@ -149,8 +149,9 @@ public final class StrokeInputCollector {
         )
     }
 
-    /// Fingers report no useful force, so they get a fixed mid-pressure rather than
-    /// zero — otherwise finger strokes would come out at `minWidth` everywhere.
+    /// Fingers and pointers report no useful force, so they get a fixed
+    /// mid-pressure rather than zero — otherwise those strokes would come out at
+    /// `minWidth` everywhere.
     private func normalisedForce(_ touch: UITouch) -> Double {
         guard touch.type == .pencil, touch.maximumPossibleForce > 0 else { return 0.55 }
         return clamp(Double(touch.force / touch.maximumPossibleForce), 0, 1)

@@ -1,3 +1,4 @@
+#if os(iOS)
 import Foundation
 import CoreML
 import Vision
@@ -195,3 +196,4 @@ public class MLTrainingService {
         return FileManager.default.fileExists(atPath: exportDir.path) ? exportDir : nil
     }
 }
+#endif

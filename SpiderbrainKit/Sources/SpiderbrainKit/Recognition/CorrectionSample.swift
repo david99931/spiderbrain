@@ -1,3 +1,4 @@
+#if os(iOS)
 import Foundation
 import UIKit
 
@@ -55,3 +56,4 @@ public struct CorrectionSample: Identifiable, Codable {
         UIImage(data: strokeImageData)
     }
 }
+#endif

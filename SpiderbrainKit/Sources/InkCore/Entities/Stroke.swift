@@ -2,7 +2,7 @@ import Foundation
 
 /// A committed stroke. Immutable once the pen lifts, which is what makes the
 /// document an append-only log and the CRDT merge trivial.
-public struct Stroke: Identifiable, Sendable, Codable {
+public struct Stroke: Identifiable, Equatable, Sendable, Codable {
     public let id: UUID
     public var points: [InkPoint]
     public var style: InkStyle

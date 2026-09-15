@@ -20,20 +20,15 @@ public struct Node: Identifiable, Equatable, Codable {
     /// Stored so we can remove it when the node is absorbed.
     public var boundaryStroke: Stroke?
 
-    /// M2 prototype: Outgoing connections to other nodes (this node → target nodes).
-    /// Represents the DAG structure where this node points to its children/details.
-    public var connections: [UUID]
-
     /// Recognized text from handwriting recognition (if available).
     public var recognizedText: RecognizedText?
 
-    public init(id: UUID = UUID(), strokes: [Stroke], bounds: Rect, style: NodeStyle = .default, boundaryStroke: Stroke? = nil, connections: [UUID] = [], recognizedText: RecognizedText? = nil) {
+    public init(id: UUID = UUID(), strokes: [Stroke], bounds: Rect, style: NodeStyle = .default, boundaryStroke: Stroke? = nil, recognizedText: RecognizedText? = nil) {
         self.id = id
         self.strokes = strokes
         self.bounds = bounds
         self.style = style
         self.boundaryStroke = boundaryStroke
-        self.connections = connections
         self.recognizedText = recognizedText
     }
 

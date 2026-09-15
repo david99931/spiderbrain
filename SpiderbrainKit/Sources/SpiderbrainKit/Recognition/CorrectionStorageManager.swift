@@ -1,3 +1,4 @@
+#if os(iOS)
 import Foundation
 
 /// Manages persistence of correction samples to disk
@@ -111,3 +112,4 @@ public struct CorrectionStatistics {
         self.trainableWords = trainableWords
     }
 }
+#endif
