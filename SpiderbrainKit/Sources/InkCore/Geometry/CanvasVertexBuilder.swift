@@ -23,7 +23,6 @@ public enum CanvasVertexBuilder {
     private static let selectedColor = (0.9, 0.6, 0.2)
     private static let connectionColor = (0.5, 0.5, 0.5)
     private static let handleColor = (0.9, 0.9, 1.0)
-    private static let lassoColor = (0.2, 0.5, 1.0)
 
     /// Every vertex for the committed canvas, in draw order.
     ///
@@ -51,17 +50,6 @@ public enum CanvasVertexBuilder {
         }
 
         return vertices
-    }
-
-    /// The in-progress lasso path, given points in view space.
-    public static func lassoPath(
-        viewPoints: [Vec2],
-        transform: ViewTransform
-    ) -> [InkVertex] {
-        guard viewPoints.count > 1 else { return [] }
-
-        let points = viewPoints.map { flatPoint(at: transform.viewToWorld($0)) }
-        return tessellate(points, color: lassoColor, alpha: 0.7, width: 2)
     }
 
     /// A node's bounding outline. Selected nodes are drawn brighter and thicker.

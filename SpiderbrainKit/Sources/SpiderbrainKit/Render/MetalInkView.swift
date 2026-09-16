@@ -77,23 +77,11 @@ public final class MetalInkView: UIView {
     /// Camera for pan and zoom. M2: world-space coordinates.
     public var camera = Camera()
 
-    /// M2 prototype: Draw mode vs Lasso mode for node creation.
-    public enum DrawMode {
-        case draw
-        case lasso
-    }
-
-    /// Current drawing mode.
-    public var drawMode: DrawMode = .draw
-
     /// Public accessor for the nodes list (read-only for UI display).
     public var allNodes: [Node] { nodes }
 
     /// Public accessor for connections list (read-only for UI display).
     public var allConnections: [Connection] { connections }
-
-    /// M2 prototype: Current lasso path (in view space) while drawing the selection.
-    private var lassoPath: [Vec2] = []
 
     /// M2 prototype: Index of node currently being dragged, if any.
     private var draggingNodeIndex: Int?
@@ -142,9 +130,6 @@ public final class MetalInkView: UIView {
     /// M2 prototype: Callback when a closed shape contains nodes (for absorb choice).
     /// Passes the closed-shape stroke id and the ids of the nodes it encloses.
     public var onClosedShapeWithNodes: ((UUID, [UUID]) -> Void)?
-
-    /// M2 prototype: Callback when lasso selects a node (for absorb/separate choice).
-    public var onNodeLassoed: ((UUID, [Stroke]) -> Void)?  // Passes node ID and selected strokes
 
     /// M2 prototype: Callback when a node is selected (for highlighting).
     public var onNodeSelected: ((UUID?) -> Void)?  // Passes node ID or nil if deselected
@@ -364,14 +349,7 @@ public final class MetalInkView: UIView {
 
         guard isDrawingTouch(touch) else { return }
 
-        switch drawMode {
-        case .draw:
-            collector.begin(touch, in: self)
-        case .lasso:
-            lassoPath.removeAll()
-            let location = touch.preciseLocation(in: self)
-            lassoPath.append(Vec2(Double(location.x), Double(location.y)))
-        }
+        collector.begin(touch, in: self)
         needsRedraw = true
     }
 
@@ -400,13 +378,7 @@ public final class MetalInkView: UIView {
 
         guard isDrawingTouch(touch) else { return }
 
-        switch drawMode {
-        case .draw:
-            collector.update(with: touch, event: event, in: self)
-        case .lasso:
-            let location = touch.preciseLocation(in: self)
-            lassoPath.append(Vec2(Double(location.x), Double(location.y)))
-        }
+        collector.update(with: touch, event: event, in: self)
         needsRedraw = true
     }
 
@@ -436,23 +408,13 @@ public final class MetalInkView: UIView {
 
         guard isDrawingTouch(touch) else { return }
 
-        switch drawMode {
-        case .draw:
-            let points = collector.finish(touch, in: self)
-            commit(points)
-        case .lasso:
-            // Close the lasso and create a node from selected strokes
-            let location = touch.preciseLocation(in: self)
-            lassoPath.append(Vec2(Double(location.x), Double(location.y)))
-            finalizeLasso()
-            lassoPath.removeAll()
-        }
+        let points = collector.finish(touch, in: self)
+        commit(points)
         needsRedraw = true
     }
 
     public override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         collector.reset()
-        lassoPath.removeAll()
         needsRedraw = true
     }
 
@@ -486,7 +448,7 @@ public final class MetalInkView: UIView {
 
         // M2 prototype: Check for draw-to-connect gesture
         // If stroke starts in one node and ends in another, create a connection
-        if drawMode == .draw, let firstPoint = worldPoints.first?.position, let lastPoint = worldPoints.last?.position {
+        if let firstPoint = worldPoints.first?.position, let lastPoint = worldPoints.last?.position {
             // Find which nodes contain the first and last points
             let startNodeIndex = nodes.firstIndex { $0.contains(firstPoint) }
             let endNodeIndex = nodes.firstIndex { $0.contains(lastPoint) }
@@ -518,7 +480,7 @@ public final class MetalInkView: UIView {
         renderer.setLiveGeometry([])
 
         // M2 prototype: Auto-detect closed shapes for node creation
-        if drawMode == .draw && isClosedShape(stroke) {
+        if isClosedShape(stroke) {
             // Check if there are nodes inside this closed shape
             let boundaryPolygon = stroke.points.map { $0.position }
             let containedNodeIds = nodes
@@ -920,188 +882,6 @@ public final class MetalInkView: UIView {
         needsRedraw = true
     }
 
-    // MARK: - Lasso Selection
-
-    /// Finalize the lasso: find strokes/nodes inside, offer options.
-    private func finalizeLasso() {
-        guard lassoPath.count > 3 else { return }  // Need at least a small closed shape
-
-        // Convert lasso path from view space to world space
-        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
-        let worldLasso = lassoPath.map { camera.viewToWorld($0, viewSize: viewSize) }
-
-        // Check if lasso overlaps any existing nodes
-        var nodesInside: [Int] = []
-        for (index, node) in nodes.enumerated() {
-            // Check if node center is inside lasso
-            if pointInPolygon(node.bounds.center, polygon: worldLasso) {
-                nodesInside.append(index)
-            }
-        }
-
-        // If we found 2+ nodes, absorb smaller one(s) into the largest
-        if nodesInside.count >= 2 {
-            // Find the largest node by area
-            let largestIndex = nodesInside.max(by: { idx1, idx2 in
-                let area1 = nodes[idx1].bounds.width * nodes[idx1].bounds.height
-                let area2 = nodes[idx2].bounds.width * nodes[idx2].bounds.height
-                return area1 < area2
-            })!
-
-            // Collect strokes from all smaller nodes
-            var strokesToAbsorb: [Stroke] = []
-            for index in nodesInside {
-                if index != largestIndex {
-                    strokesToAbsorb.append(contentsOf: nodes[index].strokes)
-                }
-            }
-
-            // Trigger callback for absorb/separate choice
-            if !strokesToAbsorb.isEmpty {
-                onNodeLassoed?(nodes[largestIndex].id, strokesToAbsorb)
-                return
-            }
-        }
-
-        // If we found exactly 1 node, offer to absorb loose strokes into it
-        if nodesInside.count == 1 {
-            let nodeIndex = nodesInside[0]
-            // Find strokes inside the lasso
-            var selectedStrokes: [Stroke] = []
-            for stroke in strokes {
-                if isStrokeInsideLasso(stroke, lasso: worldLasso) {
-                    selectedStrokes.append(stroke)
-                }
-            }
-
-            // Trigger callback for absorb/separate choice
-            if !selectedStrokes.isEmpty {
-                onNodeLassoed?(nodes[nodeIndex].id, selectedStrokes)
-                return
-            }
-        }
-
-        // No nodes selected - normal lasso behavior: create new node
-        var selectedStrokes: [Stroke] = []
-        var remainingStrokes: [Stroke] = []
-
-        for stroke in strokes {
-            if isStrokeInsideLasso(stroke, lasso: worldLasso) {
-                selectedStrokes.append(stroke)
-            } else {
-                remainingStrokes.append(stroke)
-            }
-        }
-
-        guard !selectedStrokes.isEmpty else { return }
-
-        // Create a node from the selected strokes
-        if let bounds = Node.computeBounds(selectedStrokes) {
-            let node = Node(strokes: selectedStrokes, bounds: bounds)
-            canvas.execute(
-                .createNode(node, consumingStrokes: selectedStrokes.map(\.id)),
-                origin: .local
-            )
-
-            // Rebuild committed vertices without the selected strokes
-            rebuildCommittedGeometry()
-        }
-    }
-
-    /// Absorb strokes into an existing node.
-    /// If absorbing another node's strokes, the smaller node is removed and bounds are recalculated.
-    public func absorbIntoNode(nodeId: UUID, strokes strokesToAbsorb: [Stroke]) {
-        guard let nodeIndex = nodes.firstIndex(where: { $0.id == nodeId }) else {
-            return
-        }
-
-        // Check if we're absorbing strokes from another node
-        // Build a set of stroke identifiers for faster lookup
-        var strokeIdentifiers = Set<StrokeIdentifier>()
-        for stroke in strokesToAbsorb {
-            strokeIdentifiers.insert(StrokeIdentifier(stroke: stroke))
-        }
-
-        var nodesToRemove: [Int] = []
-        for (index, otherNode) in nodes.enumerated() {
-            guard index != nodeIndex else { continue }
-
-            // Check if all of this node's strokes are being absorbed
-            let allStrokesAbsorbed = otherNode.strokes.allSatisfy { nodeStroke in
-                strokeIdentifiers.contains(StrokeIdentifier(stroke: nodeStroke))
-            }
-
-            if allStrokesAbsorbed {
-                nodesToRemove.append(index)
-            }
-        }
-
-        // Build the absorbed node: existing strokes plus the newly absorbed ones.
-        var absorbedNode = nodes[nodeIndex]
-        absorbedNode.strokes.append(contentsOf: strokesToAbsorb)
-        if let newBounds = Node.computeBounds(absorbedNode.strokes) {
-            absorbedNode.bounds = newBounds
-        }
-
-        let deletedNodeIds = nodesToRemove.map { nodes[$0].id }
-
-        var effects: [CanvasEffect] = []
-        if deletedNodeIds.isEmpty {
-            effects += canvas.execute(.updateNode(absorbedNode), origin: .local)
-        } else {
-            // Nodes are being swallowed, so this is a merge: the executor removes
-            // them and re-points their external edges at the surviving node.
-            effects += canvas.execute(
-                .mergeNodes(absorbing: deletedNodeIds + [absorbedNode.id],
-                            into: absorbedNode,
-                            consumingStrokes: []),
-                origin: .local
-            )
-        }
-
-        // Remove these strokes from the main canvas
-        let absorbedStrokeIds = strokes
-            .filter { strokeIdentifiers.contains(StrokeIdentifier(stroke: $0)) }
-            .map(\.id)
-        effects += canvas.execute(.deleteStrokes(ids: absorbedStrokeIds), origin: .local)
-
-        broadcast(effects)
-
-        rebuildCommittedGeometry()
-        needsRedraw = true
-        onNodesChanged?(nodes)  // Notify UI to refresh
-    }
-
-    /// Create a new node from strokes (separate operation).
-    public func separateIntoNewNode(strokes strokesToSeparate: [Stroke]) {
-        guard !strokesToSeparate.isEmpty else { return }
-
-        if let bounds = Node.computeBounds(strokesToSeparate) {
-            let node = Node(strokes: strokesToSeparate, bounds: bounds)
-
-            // Work out which canvas strokes the new node swallows.
-            var separatedStrokeIds: [UUID] = []
-            for stroke in strokes {
-                let isSeparated = strokesToSeparate.contains { separatedStroke in
-                    separatedStroke.points.count == stroke.points.count &&
-                    separatedStroke.points.first?.position == stroke.points.first?.position
-                }
-                if isSeparated {
-                    separatedStrokeIds.append(stroke.id)
-                }
-            }
-            let effects = canvas.execute(
-                .createNode(node, consumingStrokes: separatedStrokeIds),
-                origin: .local
-            )
-            broadcast(effects)
-
-            rebuildCommittedGeometry()
-            needsRedraw = true
-        }
-    }
-
-    /// Check if a stroke is inside the lasso polygon (uses bounding box + sampling).
     private func isStrokeInsideLasso(_ stroke: Stroke, lasso: [Vec2]) -> Bool {
         return GeometryManager.isStrokeInsideLasso(stroke, lasso: lasso)
     }
@@ -1110,7 +890,7 @@ public final class MetalInkView: UIView {
         return GeometryManager.pointInPolygon(point, polygon: polygon)
     }
 
-    /// Rebuild committed geometry from current strokes (used after lasso selection).
+    /// Rebuild committed geometry from the current canvas contents.
     private func rebuildCommittedGeometry() {
         committedVertices = CanvasVertexBuilder.committedGeometry(
             strokes: strokes,
@@ -1128,11 +908,6 @@ public final class MetalInkView: UIView {
             selectedNodeId: selectedNodeId,
             selectedConnectionId: selectedConnectionId
         )
-    }
-
-    /// Generate line vertices for the in-progress lasso path.
-    private func lassoPathVertices() -> [InkVertex] {
-        CanvasVertexBuilder.lassoPath(viewPoints: lassoPath, transform: viewTransform)
     }
 
     public func clear() {
@@ -1300,19 +1075,15 @@ public final class MetalInkView: UIView {
         }
         lastFrameTimestamp = link.timestamp
 
-        // Build live geometry: current stroke OR lasso path
+        // Build live geometry for the stroke in progress
         var liveVertices: [InkVertex] = []
 
-        if collector.isDrawing && drawMode == .draw {
+        if collector.isDrawing {
             let points = collector.renderPoints
             // Convert live points to world space before tessellating
             let worldPoints = toWorldSpace(points)
             let resampled = StrokeSmoother.resample(worldPoints)
             liveVertices = Tessellator.tessellate(resampled, style: style)
-            needsRedraw = true
-        } else if !lassoPath.isEmpty && drawMode == .lasso {
-            // Render lasso path as a line
-            liveVertices = lassoPathVertices()
             needsRedraw = true
         }
 

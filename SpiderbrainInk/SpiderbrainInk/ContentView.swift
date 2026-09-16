@@ -7,7 +7,6 @@ import SpiderbrainKit
 /// if there is one, shows up in the pen-to-ink gap, not in a screenshot.
 struct ContentView: View {
     @State private var engine: Engine = .metal
-    @State private var mode: DrawMode = .draw
     @State private var predictionEnabled = true
     @State private var stats = MetalInkView.HUDStats()
     @State private var clearToken = 0
@@ -29,10 +28,6 @@ struct ContentView: View {
     @State private var detectToken = 0
     @State private var deleteNodeId: UUID? = nil
     @State private var deleteToken = 0
-    @State private var lasssoedNodeId: UUID? = nil
-    @State private var lassoedStrokes: [Stroke] = []
-    @State private var absorbToken = 0
-    @State private var separateToken = 0
     @State private var selectedNodeId: UUID? = nil
     @State private var selectedConnectionId: UUID? = nil
     @State private var deleteConnectionToken = 0
@@ -62,12 +57,6 @@ struct ContentView: View {
         var id: String { rawValue }
     }
 
-    enum DrawMode: String, CaseIterable, Identifiable {
-        case draw = "Draw"
-        case lasso = "Lasso"
-        var id: String { rawValue }
-    }
-
     var body: some View {
         // Debug logging - uncomment if needed
         // let _ = print("🟣 VIEW BODY: existingNodes has \(existingNodes.count) nodes, refreshTrigger: \(refreshTrigger)")
@@ -78,7 +67,6 @@ struct ContentView: View {
                 switch engine {
                 case .metal:
                     MetalInkCanvas(
-                        mode: mode,
                         predictionEnabled: predictionEnabled,
                         clearToken: clearToken,
                         undoToken: undoToken,
@@ -90,10 +78,6 @@ struct ContentView: View {
                         detectToken: detectToken,
                         deleteNodeId: deleteNodeId,
                         deleteToken: deleteToken,
-                        absorbToken: absorbToken,
-                        separateToken: separateToken,
-                        lassoedNodeId: lasssoedNodeId,
-                        lassoedStrokes: lassoedStrokes,
                         selectedConnectionId: selectedConnectionId,
                         deleteConnectionToken: deleteConnectionToken,
                         recognizeNodeId: recognizeNodeId,
@@ -161,14 +145,6 @@ struct ContentView: View {
                             // Add to shapes with nodes queue
                             shapesWithNodes.append((strokeId: strokeId, nodeIds: nodeIds))
                         },
-                        onNodeLassoed: { nodeId, strokes in
-                            lasssoedNodeId = nodeId
-                            lassoedStrokes = strokes
-                        },
-                        onClearLassoState: {
-                            lasssoedNodeId = nil
-                            lassoedStrokes = []
-                        },
                         onNodeSelected: { nodeId in
                             selectedNodeId = nodeId
                         },
@@ -212,12 +188,6 @@ struct ContentView: View {
                 .frame(width: 240)
 
                 if engine == .metal {
-                    Picker("Mode", selection: $mode) {
-                        ForEach(DrawMode.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 160)
-
                     Toggle("Prediction", isOn: $predictionEnabled)
                         .toggleStyle(.switch)
                         .fixedSize()
@@ -457,47 +427,6 @@ struct ContentView: View {
                                 }
                                 .padding(16)
                                 .background(Color.orange.opacity(0.1))
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                .padding(.horizontal, 16)
-                                .padding(.top, 8)
-
-                                Divider()
-                            }
-
-                            // Lassoed node - absorb/separate options
-                            if lasssoedNodeId != nil, !lassoedStrokes.isEmpty {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    Text("Node Selected")
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-
-                                    Text("\(lassoedStrokes.count) stroke\(lassoedStrokes.count == 1 ? "" : "s") selected")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-
-                                    HStack(spacing: 12) {
-                                        Button("Absorb") {
-                                            absorbToken += 1
-                                        }
-                                        .buttonStyle(.borderedProminent)
-                                        .controlSize(.small)
-
-                                        Button("Separate") {
-                                            separateToken += 1
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .controlSize(.small)
-
-                                        Button("Cancel") {
-                                            lasssoedNodeId = nil
-                                            lassoedStrokes = []
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .controlSize(.small)
-                                    }
-                                }
-                                .padding(16)
-                                .background(Color.blue.opacity(0.1))
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                                 .padding(.horizontal, 16)
                                 .padding(.top, 8)
@@ -1097,7 +1026,6 @@ extension SyncCoordinator: MetalStrokeSyncDelegate {
 // MARK: - Bridges
 
 private struct MetalInkCanvas: UIViewRepresentable {
-    var mode: ContentView.DrawMode
     var predictionEnabled: Bool
     var clearToken: Int
     var undoToken: Int
@@ -1109,10 +1037,6 @@ private struct MetalInkCanvas: UIViewRepresentable {
     var detectToken: Int
     var deleteNodeId: UUID?
     var deleteToken: Int
-    var absorbToken: Int
-    var separateToken: Int
-    var lassoedNodeId: UUID?
-    var lassoedStrokes: [Stroke]
     var selectedConnectionId: UUID?
     var deleteConnectionToken: Int
     var recognizeNodeId: UUID?
@@ -1123,8 +1047,6 @@ private struct MetalInkCanvas: UIViewRepresentable {
     var onNodesChanged: (([Node]) -> Void)?
     var onClosedShapeDetected: ((UUID) -> Void)?
     var onClosedShapeWithNodes: ((UUID, [UUID]) -> Void)?
-    var onNodeLassoed: ((UUID, [Stroke]) -> Void)?
-    var onClearLassoState: (() -> Void)?
     var onNodeSelected: ((UUID?) -> Void)?
     var onConnectionSelected: ((UUID?) -> Void)?
 
@@ -1135,7 +1057,6 @@ private struct MetalInkCanvas: UIViewRepresentable {
         view.onStatsUpdate = onStats
         view.onClosedShapeDetected = onClosedShapeDetected
         view.onClosedShapeWithNodes = onClosedShapeWithNodes
-        view.onNodeLassoed = onNodeLassoed
         view.onNodesChanged = onNodesChanged
         view.onNodeSelected = onNodeSelected
         view.onConnectionSelected = onConnectionSelected
@@ -1181,19 +1102,13 @@ private struct MetalInkCanvas: UIViewRepresentable {
         context.coordinator.lastConvertNode = convertNodeToken
         context.coordinator.lastDetect = detectToken
         context.coordinator.lastDelete = deleteToken
-        context.coordinator.lastAbsorb = absorbToken
-        context.coordinator.lastSeparate = separateToken
         context.coordinator.lastRecognize = recognizeToken
         return view
     }
 
     func updateUIView(_ view: MetalInkView, context: Context) {
-        // Update mode
-        view.drawMode = mode == .draw ? .draw : .lasso
-
         view.predictionEnabled = predictionEnabled
         view.onClosedShapeDetected = onClosedShapeDetected
-        view.onNodeLassoed = onNodeLassoed
         view.onNodeSelected = onNodeSelected
 
         if context.coordinator.lastClear != clearToken {
@@ -1239,37 +1154,12 @@ private struct MetalInkCanvas: UIViewRepresentable {
             view.convertStrokeToNodeWithAbsorb(strokeId: strokeId)
         }
 
-        // Handle absorb (from lasso mode)
-        if context.coordinator.lastAbsorb != absorbToken,
-           let nodeId = lassoedNodeId {
-            context.coordinator.lastAbsorb = absorbToken
-            view.absorbIntoNode(nodeId: nodeId, strokes: lassoedStrokes)
-            // Trigger callback to clear lasso state
-            context.coordinator.shouldClearLassoState = true
-        }
-
-        // Handle separate
-        if context.coordinator.lastSeparate != separateToken {
-            context.coordinator.lastSeparate = separateToken
-            view.separateIntoNewNode(strokes: lassoedStrokes)
-            // Trigger callback to clear lasso state
-            context.coordinator.shouldClearLassoState = true
-        }
-
         // Handle text recognition
         if context.coordinator.lastRecognize != recognizeToken,
            let nodeId = recognizeNodeId {
             context.coordinator.lastRecognize = recognizeToken
             Task {
                 await view.recognizeTextInNode(nodeId: nodeId)
-            }
-        }
-
-        // Clear lasso state if requested
-        if context.coordinator.shouldClearLassoState {
-            context.coordinator.shouldClearLassoState = false
-            DispatchQueue.main.async {
-                onClearLassoState?()
             }
         }
 
@@ -1294,11 +1184,8 @@ private struct MetalInkCanvas: UIViewRepresentable {
         var lastAbsorbNode = 0
         var lastDetect = 0
         var lastDelete = 0
-        var lastAbsorb = 0
-        var lastSeparate = 0
         var lastDeleteConnection = 0
         var lastRecognize = 0
-        var shouldClearLassoState = false
         var shouldClearConnectionSelection = false
     }
 }
