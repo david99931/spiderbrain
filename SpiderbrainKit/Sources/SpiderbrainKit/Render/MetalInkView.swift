@@ -33,9 +33,9 @@ public final class MetalInkView: UIView {
 
     // MARK: - Data Storage
 
-    /// Owns the canvas — strokes, nodes and connections. Every mutation goes
-    /// through this; the properties below are read-only views of its contents.
-    private let canvas = CanvasCommandExecutor()
+    /// Owns the canvas and every operation on it. The view holds no canvas state
+    /// of its own; the properties below are read-only views of the controller's.
+    private let canvas = CanvasController()
 
     /// Announce a set of effects to peers in an order they can apply.
     ///
@@ -66,7 +66,7 @@ public final class MetalInkView: UIView {
         }
     }
 
-    /// Read-only views. Mutate via `canvas.execute`.
+    /// Read-only views. Mutate by calling an operation on the controller.
     private var strokes: [Stroke] { canvas.strokes }
     private var nodes: [Node] { canvas.nodes }
     private var connections: [Connection] { canvas.connections }
@@ -470,7 +470,7 @@ public final class MetalInkView: UIView {
 
         // Normal stroke creation (not a connection)
         let stroke = Stroke(points: worldPoints, style: style)
-        broadcast(canvas.execute(.addStroke(stroke), origin: .local))
+        broadcast(canvas.addStroke(stroke))
 
         // Append this stroke's geometry to the committed buffer rather than
         // re-tessellating every stroke. M2 replaces this with tile rasterisation.
@@ -514,145 +514,25 @@ public final class MetalInkView: UIView {
     /// Takes an id rather than an index because callers queue this across user
     /// interaction, during which the stroke array can change.
     public func convertStrokeToNode(strokeId: UUID) {
-        guard let index = strokes.firstIndex(where: { $0.id == strokeId }) else {
-            print("⚠️ convertStrokeToNode: stroke \(strokeId) no longer exists")
-            return
-        }
-
-        let boundaryStroke = strokes[index]
-
-        guard isClosedShape(boundaryStroke) else {
-            print("⚠️ convertStrokeToNode: stroke \(strokeId) is not a closed shape")
-            return
-        }
-
-        // Use the boundary stroke's points as a polygon
-        let boundaryPolygon = boundaryStroke.points.map { $0.position }
-
-        // Find all strokes INSIDE the boundary (excluding the boundary itself)
-        var containedStrokes: [Stroke] = []
-        var indicesToRemove: [Int] = [index]  // Always remove the boundary
-
-        // Check for strokes inside the boundary
-        for (i, stroke) in strokes.enumerated() {
-            // Skip the boundary stroke itself
-            guard i != index else { continue }
-
-            // Check if this stroke is inside the boundary
-            if isStrokeInsideLasso(stroke, lasso: boundaryPolygon) {
-                containedStrokes.append(stroke)
-                indicesToRemove.append(i)
-            }
-        }
-
-        // Create node - absorb loose strokes if any, otherwise empty
-        let bounds: Rect
-        let node: Node
-
-        if !containedStrokes.isEmpty {
-            // If strokes inside, absorb them
-            bounds = Node.computeBounds(containedStrokes)!
-            node = Node(strokes: containedStrokes, bounds: bounds, boundaryStroke: boundaryStroke)
-        } else {
-            // Empty node - use the boundary stroke's bounds
-            bounds = Node.computeBounds([boundaryStroke])!
-            node = Node(strokes: [], bounds: bounds, boundaryStroke: boundaryStroke)
-        }
-
-        // Collect stroke IDs BEFORE removing them
-        var deletedStrokeIds: [UUID] = []
-        for i in indicesToRemove {
-            if i >= 0 && i < strokes.count {
-                deletedStrokeIds.append(strokes[i].id)
-            }
-        }
-
-        // One command: the node appears and its strokes leave the canvas together.
-        let effects = canvas.execute(
-            .createNode(node, consumingStrokes: deletedStrokeIds),
-            origin: .local
-        )
+        let effects = canvas.convertStrokeToNode(strokeId: strokeId)
+        guard !effects.isEmpty else { return }
 
         broadcast(effects)
-
-        // Rebuild geometry
         rebuildCommittedGeometry()
         needsRedraw = true
         onNodesChanged?(nodes)
     }
 
-    /// Convert a stroke to a node and absorb all nodes inside it.
-    ///
-    /// Takes an id rather than an index for the same reason as `convertStrokeToNode`.
     public func convertStrokeToNodeWithAbsorb(strokeId: UUID) {
-        guard let index = strokes.firstIndex(where: { $0.id == strokeId }) else {
-            print("⚠️ convertStrokeToNodeWithAbsorb: stroke \(strokeId) no longer exists")
-            return
-        }
-
-        let boundaryStroke = strokes[index]
-
-        // Use the boundary stroke's points as a polygon
-        let boundaryPolygon = boundaryStroke.points.map { $0.position }
-
-        // Find all strokes and nodes inside the boundary
-        var allStrokes: [Stroke] = []
-        var indicesToRemove: [Int] = [index]  // Always remove the boundary
-        var nodesToRemove: [Int] = []
-
-        // Check for strokes inside the boundary
-        for (i, stroke) in strokes.enumerated() {
-            guard i != index else { continue }
-
-            if isStrokeInsideLasso(stroke, lasso: boundaryPolygon) {
-                allStrokes.append(stroke)
-                indicesToRemove.append(i)
-            }
-        }
-
-        // Check for nodes inside and collect their strokes
-        var enclosedNodeIds = Set<UUID>()
-        for (i, node) in nodes.enumerated() {
-            if pointInPolygon(node.bounds.center, polygon: boundaryPolygon) {
-                allStrokes.append(contentsOf: node.strokes)
-                nodesToRemove.append(i)
-                enclosedNodeIds.insert(node.id)
-            }
-        }
-
-        // Create merged node with all strokes
-        // If there are no strokes, use the boundary stroke itself to compute bounds
-        guard let bounds = Node.computeBounds(allStrokes.isEmpty ? [boundaryStroke] : allStrokes) else {
-            return
-        }
-        let mergedNode = Node(strokes: allStrokes, bounds: bounds, boundaryStroke: boundaryStroke)
-
-        let deletedStrokeIds = indicesToRemove
-            .filter { $0 >= 0 && $0 < strokes.count }
-            .map { strokes[$0].id }
-
-        // One atomic command. The executor deletes the strokes, removes the absorbed
-        // nodes, adds the merged node, and re-points the absorbed nodes' external
-        // edges at it — so a peer never observes the canvas mid-merge.
-        let effects = canvas.execute(
-            .mergeNodes(
-                absorbing: Array(enclosedNodeIds),
-                into: mergedNode,
-                consumingStrokes: deletedStrokeIds
-            ),
-            origin: .local
-        )
+        let effects = canvas.convertStrokeToNodeWithAbsorb(strokeId: strokeId)
+        guard !effects.isEmpty else { return }
 
         broadcast(effects)
-
-        // Rebuild geometry
         rebuildCommittedGeometry()
         needsRedraw = true
         onNodesChanged?(nodes)
     }
 
-    /// Find the index of the node at the given point in view space (returns topmost if overlapping).
-    /// Expands hit area for small nodes to make them easier to select.
     /// The current camera paired with the view's size.
     private var viewTransform: ViewTransform {
         ViewTransform(camera: camera, viewSize: Vec2(Double(bounds.width), Double(bounds.height)))
@@ -661,7 +541,7 @@ public final class MetalInkView: UIView {
     /// Index of the topmost node at a view point.
     ///
     /// Still index-based because the drag machinery tracks `draggingNodeIndex`;
-    /// the hit test itself now lives in `CanvasHitTesting`.
+    /// the hit test itself lives in `CanvasHitTesting`.
     private func nodeAt(viewPoint: Vec2) -> Int? {
         guard let hit = CanvasHitTesting.node(at: viewPoint, in: nodes, transform: viewTransform)
         else { return nil }
@@ -680,56 +560,16 @@ public final class MetalInkView: UIView {
 
     /// Detect and absorb strokes inside a specific node (one-time action).
     public func detectStrokesInNode(nodeId: UUID) {
-        guard let nodeIndex = nodes.firstIndex(where: { $0.id == nodeId }) else { return }
+        let effects = canvas.detectStrokesInNode(nodeId: nodeId)
 
-        let node = nodes[nodeIndex]
-        var strokesToAbsorb: [Stroke] = []
-        var remainingStrokes: [Stroke] = []
-
-        // Find all strokes inside this node's bounds
-        for stroke in strokes {
-            // Check if most of the stroke is inside this node's bounds
-            var insideCount = 0
-            let sampleCount = min(stroke.points.count, 10)
-            let step = max(1, stroke.points.count / sampleCount)
-
-            for i in stride(from: 0, to: stroke.points.count, by: step) {
-                if node.bounds.contains(stroke.points[i].position) {
-                    insideCount += 1
-                }
-            }
-
-            // If more than half the samples are inside, mark for absorption
-            if insideCount > sampleCount / 2 {
-                strokesToAbsorb.append(stroke)
-            } else {
-                remainingStrokes.append(stroke)
-            }
-        }
-
-        // Absorb the strokes into the node (keep original bounds)
-        if !strokesToAbsorb.isEmpty {
-            // Don't clear recognized text - let user re-recognize manually to add new words
-            // This way "david" stays, and clicking recognize again will find "david hello"
-            // Don't recalculate bounds - keep the original circle size
-            var absorbing = nodes[nodeIndex]
-            absorbing.strokes.append(contentsOf: strokesToAbsorb)
-            var effects = canvas.execute(.updateNode(absorbing), origin: .local)
-            effects += canvas.execute(
-                .deleteStrokes(ids: strokesToAbsorb.map(\.id)),
-                origin: .local
-            )
+        if !effects.isEmpty {
             broadcast(effects)
-
             rebuildCommittedGeometry()
             needsRedraw = true
         }
 
-        // Always notify UI to refresh (even if nothing changed)
-        // Debug logging - uncomment if needed
-        // print("🟠 [MetalInkView] Before callback: nodes[\(nodeIndex)] has \(nodes[nodeIndex].strokes.count) strokes")
+        // Always notify the UI, even when nothing moved.
         onNodesChanged?(nodes)
-        // print("🟠 [MetalInkView] After callback: nodes[\(nodeIndex)] has \(nodes[nodeIndex].strokes.count) strokes")
     }
 
     // MARK: - Text Recognition
@@ -737,13 +577,14 @@ public final class MetalInkView: UIView {
     /// Recognize handwritten text in a specific node using Vision Framework.
     /// Updates the node's recognizedText property and notifies UI.
     public func recognizeTextInNode(nodeId: UUID) async {
-        guard let nodeIndex = nodes.firstIndex(where: { $0.id == nodeId }) else { return }
+        guard let node = canvas.node(withId: nodeId) else { return }
 
-        let result = await recognitionService.recognizeText(from: nodes[nodeIndex])
+        // Recognition itself is a platform service, so it runs here rather than in
+        // the controller; only the result crosses over.
+        let result = await recognitionService.recognizeText(from: node)
 
         switch result {
         case .success(let text, let confidence, let source):
-            // Convert source enum to codable version
             let sourceData: RecognizedText.RecognitionSourceData
             switch source {
             case .vision(let conf):
@@ -754,16 +595,12 @@ public final class MetalInkView: UIView {
                 sourceData = .correctionHistory(matchConfidence: conf)
             }
 
-            // Update node with recognized text
-            guard var node = canvas.node(withId: nodeId) else { return }
-            node.recognizedText = RecognizedText(
+            let recognized = RecognizedText(
                 text: text,
                 confidence: confidence,
                 source: sourceData
             )
-            canvas.execute(.updateNode(node), origin: .local)
-
-            // Notify UI
+            broadcast(canvas.applyRecognizedText(recognized, toNodeId: nodeId))
             onNodesChanged?(nodes)
 
         case .failure(let error):
@@ -774,7 +611,7 @@ public final class MetalInkView: UIView {
     /// Delete a node by its ID, returning its strokes to the canvas.
     public func deleteNode(id nodeId: UUID) {
         // The executor returns the strokes and drops the node's edges in one step.
-        let effects = canvas.execute(.deleteNode(id: nodeId, returningStrokes: true), origin: .local)
+        let effects = canvas.deleteNode(id: nodeId)
         guard !effects.isEmpty else { return }
 
         broadcast(effects)
@@ -806,84 +643,23 @@ public final class MetalInkView: UIView {
     /// Resize a node by dragging the bottom-right handle to endPoint (view space).
     /// Scales proportionally maintaining aspect ratio - handle moves diagonally (like GoodNotes).
     private func resizeNode(id nodeId: UUID, endPoint: Vec2) {
-        guard let nodeIndex = nodes.firstIndex(where: { $0.id == nodeId }) else { return }
+        // Scale against the bounds captured when the drag began, so repeated
+        // frames measure from a fixed origin rather than compounding.
+        guard let startBounds = resizeStartBounds,
+              let startStrokes = resizeStartStrokes else { return }
 
-        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
-
-        // Use the original bounds from when resize started
-        guard let oldBounds = resizeStartBounds else { return }
-
-        // Center point stays fixed - node scales from center
-        let center = oldBounds.center
-
-        // Calculate original aspect ratio
-        let aspectRatio = oldBounds.width / oldBounds.height
-
-        // Convert drag point to world space
-        let endWorldPoint = camera.viewToWorld(endPoint, viewSize: viewSize)
-
-        // Calculate how far the handle is from center
-        let deltaFromCenter = endWorldPoint - center
-
-        // Calculate the average scale based on both dimensions
-        // This determines how much bigger/smaller the node should be
-        let scaleFromX = abs(deltaFromCenter.x) / (oldBounds.width / 2.0)
-        let scaleFromY = abs(deltaFromCenter.y) / (oldBounds.height / 2.0)
-
-        // Use the average of both scales to get smooth proportional scaling
-        var scale = (scaleFromX + scaleFromY) / 2.0
-
-        // Enforce minimum size (40x40 points in world space)
-        let minSizeWorld = 40.0 / Double(camera.zoom)
-        let minScale = minSizeWorld / min(oldBounds.width, oldBounds.height)
-        scale = max(scale, minScale)
-
-        // Calculate new dimensions maintaining aspect ratio
-        let newWidth = oldBounds.width * scale
-        let newHeight = oldBounds.height * scale
-
-        // New bounds centered at the same center point
-        let newBounds = Rect(
-            x: center.x - newWidth / 2.0,
-            y: center.y - newHeight / 2.0,
-            width: newWidth,
-            height: newHeight
+        let effects = canvas.resizeNode(
+            id: nodeId,
+            to: endPoint,
+            startBounds: startBounds,
+            startStrokes: startStrokes,
+            transform: viewTransform
         )
+        guard !effects.isEmpty else { return }
 
-        // Scale all strokes uniformly
-        var scaledStrokes: [Stroke] = []
-
-        // Use the original strokes stored when resize started
-        guard let originalStrokes = resizeStartStrokes else { return }
-
-        for stroke in originalStrokes {
-            var scaledPoints: [InkPoint] = []
-            for point in stroke.points {
-                // Scale uniformly from center point using original positions
-                let offsetFromCenter = point.position - center
-                let scaledOffset = offsetFromCenter * scale
-                let newPosition = center + scaledOffset
-
-                var newPoint = point
-                newPoint.position = newPosition
-                scaledPoints.append(newPoint)
-            }
-            scaledStrokes.append(Stroke(points: scaledPoints, style: stroke.style))
-        }
-
-        // Update node
-        var resized = nodes[nodeIndex]
-        resized.strokes = scaledStrokes
-        resized.bounds = newBounds
-        canvas.execute(.updateNode(resized), origin: .local)
-
-        // Rebuild geometry
+        // Not broadcast per frame: one update goes out on release.
         rebuildCommittedGeometry()
         needsRedraw = true
-    }
-
-    private func isStrokeInsideLasso(_ stroke: Stroke, lasso: [Vec2]) -> Bool {
-        return GeometryManager.isStrokeInsideLasso(stroke, lasso: lasso)
     }
 
     private func pointInPolygon(_ point: Vec2, polygon: [Vec2]) -> Bool {
@@ -915,7 +691,7 @@ public final class MetalInkView: UIView {
         // protocol has no atomic "clear canvas" message — syncing it as hundreds of
         // individual deletions would be non-atomic and could leave a peer showing a
         // half-cleared canvas. Revisit once nodes and connections have executors.
-        canvas.execute(.clearCanvas, origin: .local)
+        _ = canvas.clear()
         committedVertices.removeAll()
         renderer.setCommittedGeometry([])
         renderer.setLiveGeometry([])
@@ -924,7 +700,7 @@ public final class MetalInkView: UIView {
     }
 
     public func undoLastStroke() {
-        let effects = canvas.execute(.removeLastStroke, origin: .local)
+        let effects = canvas.undoLastStroke()
 
         // The executor reports only strokes that were really there, so an undo on
         // an empty canvas broadcasts nothing.
@@ -939,7 +715,7 @@ public final class MetalInkView: UIView {
     public func addReceivedStroke(_ stroke: Stroke) {
         // The executor is idempotent by stroke id, so duplicates arriving over
         // multiple peer connections are dropped here rather than at each call site.
-        let effects = canvas.execute(.addStroke(stroke), origin: .remote)
+        let effects = canvas.applyReceivedStroke(stroke)
         guard !effects.isEmpty else {
             print("⚠️ addReceivedStroke: ignoring duplicate stroke \(stroke.id)")
             return
@@ -951,7 +727,7 @@ public final class MetalInkView: UIView {
 
     /// Delete a stroke received from a peer (for sync).
     public func deleteReceivedStroke(id: UUID) {
-        let effects = canvas.execute(.deleteStrokes(ids: [id]), origin: .remote)
+        let effects = canvas.applyReceivedStrokeDeletion(id: id)
         guard !effects.isEmpty else {
             print("⚠️ deleteReceivedStroke: stroke \(id) not found in \(strokes.count) strokes")
             return
@@ -966,7 +742,7 @@ public final class MetalInkView: UIView {
     /// Edges arrive as their own messages rather than being reconstructed from the
     /// node, so there is nothing to reconcile here.
     public func addReceivedNode(_ node: Node) {
-        let effects = canvas.execute(.createNode(node, consumingStrokes: []), origin: .remote)
+        let effects = canvas.applyReceivedNode(node)
         guard !effects.isEmpty else { return }
 
         onNodesChanged?(nodes)
@@ -976,7 +752,7 @@ public final class MetalInkView: UIView {
 
     /// Update a node received from a peer (for sync).
     public func updateReceivedNode(_ node: Node) {
-        let effects = canvas.execute(.updateNode(node), origin: .remote)
+        let effects = canvas.applyReceivedNodeUpdate(node)
         guard !effects.isEmpty else { return }
 
         onNodesChanged?(nodes)
@@ -989,7 +765,7 @@ public final class MetalInkView: UIView {
     /// The executor drops any edges touching the node, so a peer deleting a node
     /// cleans up its arrows without a separate message.
     public func deleteReceivedNode(id: UUID) {
-        let effects = canvas.execute(.deleteNode(id: id, returningStrokes: false), origin: .remote)
+        let effects = canvas.applyReceivedNodeDeletion(id: id)
         guard !effects.isEmpty else { return }
 
         onNodesChanged?(nodes)
@@ -1003,10 +779,7 @@ public final class MetalInkView: UIView {
     /// draw between. Nothing retries a dropped edge, so senders must announce a node
     /// before any edge that points at it.
     public func addReceivedConnection(_ connection: Connection) {
-        let effects = canvas.execute(
-            .connect(from: connection.from, to: connection.to),
-            origin: .remote
-        )
+        let effects = canvas.applyReceivedConnection(connection)
         guard !effects.isEmpty else { return }
 
         rebuildCommittedGeometry()
@@ -1015,7 +788,7 @@ public final class MetalInkView: UIView {
 
     /// Delete a connection received from a peer (for sync).
     public func deleteReceivedConnection(id: UUID) {
-        let effects = canvas.execute(.disconnect(id: id), origin: .remote)
+        let effects = canvas.applyReceivedConnectionDeletion(id: id)
         guard !effects.isEmpty else { return }
 
         rebuildCommittedGeometry()
@@ -1028,7 +801,7 @@ public final class MetalInkView: UIView {
     /// Rejects self-loops, duplicates, and edges to nodes that don't exist.
     @discardableResult
     public func addConnection(from sourceId: UUID, to targetId: UUID) -> Bool {
-        let effects = canvas.execute(.connect(from: sourceId, to: targetId), origin: .local)
+        let effects = canvas.connect(from: sourceId, to: targetId)
         guard !effects.isEmpty else { return false }
 
         broadcast(effects)
@@ -1038,7 +811,7 @@ public final class MetalInkView: UIView {
 
     /// Remove a connection by its ID.
     public func removeConnection(id: UUID) {
-        let effects = canvas.execute(.disconnect(id: id), origin: .local)
+        let effects = canvas.disconnect(id: id)
         guard !effects.isEmpty else { return }
 
         // Clear selection if this connection was selected
@@ -1144,22 +917,11 @@ public final class MetalInkView: UIView {
                 let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
                 let worldPoint = camera.viewToWorld(viewPoint, viewSize: viewSize)
 
-                // Calculate new center accounting for drag offset
-                let newCenter = worldPoint - dragOffset
-                var dragged = nodes[nodeIndex]
-                let delta = newCenter - dragged.bounds.center
-
-                // Move the node and the strokes inside it, then write it back.
+                // Move by the delta from where the node sits now.
                 // Not synced per frame: one update goes out on release.
-                dragged.bounds.x += delta.x
-                dragged.bounds.y += delta.y
-                for i in dragged.strokes.indices {
-                    for j in dragged.strokes[i].points.indices {
-                        dragged.strokes[i].points[j].position =
-                            dragged.strokes[i].points[j].position + delta
-                    }
-                }
-                canvas.execute(.updateNode(dragged), origin: .local)
+                let newCenter = worldPoint - dragOffset
+                let delta = newCenter - nodes[nodeIndex].bounds.center
+                _ = canvas.moveNode(id: nodes[nodeIndex].id, by: delta)
 
                 rebuildCommittedGeometry()
                 needsRedraw = true
