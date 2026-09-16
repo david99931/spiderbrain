@@ -539,76 +539,7 @@ public final class MetalInkView: UIView {
 
     /// Detect if a stroke forms a closed shape (endpoints close together).
     private func isClosedShape(_ stroke: Stroke) -> Bool {
-        guard stroke.points.count > 5 else { return false }  // Need minimum length
-
-        let start = stroke.points.first!.position
-        let end = stroke.points.last!.position
-        let distance = start.distance(to: end)
-
-        // Calculate the stroke's approximate size
-        guard let bounds = stroke.bounds else { return false }
-        let size = max(bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y)
-
-        // Endpoints should be close relative to the stroke size (relaxed threshold)
-        let closureThreshold = size * 0.25  // 25% of stroke size
-        guard distance < closureThreshold else { return false }
-
-        // Filter out letter-sized circles (likely "o", "O", "0")
-        // Check if there are similar-sized strokes nearby (indicating text)
-        if isLikelyLetter(stroke, size: size) {
-            return false
-        }
-
-        return true
-    }
-
-    /// Heuristic to detect if a small circle is likely a letter (o, O, 0) based on nearby strokes.
-    private func isLikelyLetter(_ stroke: Stroke, size: Double) -> Bool {
-        // Only check small circles (typical letter size)
-        let maxLetterSize = 60.0  // Maximum size for a letter at typical handwriting scale
-        guard size < maxLetterSize else { return false }
-
-        guard let strokeBounds = stroke.bounds else { return false }
-        let strokeCenter = Vec2(
-            strokeBounds.min.x + (strokeBounds.max.x - strokeBounds.min.x) / 2,
-            strokeBounds.min.y + (strokeBounds.max.y - strokeBounds.min.y) / 2
-        )
-
-        // Look for nearby strokes of similar size (indicating text)
-        let searchRadius = size * 3.0  // Look within 3x the stroke size
-        var nearbyStrokesCount = 0
-
-        for otherStroke in strokes {
-            guard let otherBounds = otherStroke.bounds else { continue }
-
-            let otherCenter = Vec2(
-                otherBounds.min.x + (otherBounds.max.x - otherBounds.min.x) / 2,
-                otherBounds.min.y + (otherBounds.max.y - otherBounds.min.y) / 2
-            )
-
-            let distanceToOther = strokeCenter.distance(to: otherCenter)
-
-            // Skip the stroke itself
-            if distanceToOther < 0.1 { continue }
-
-            // Check if nearby and similar size
-            if distanceToOther < searchRadius {
-                let otherSize = max(otherBounds.max.x - otherBounds.min.x, otherBounds.max.y - otherBounds.min.y)
-                let sizeRatio = otherSize / size
-
-                // Similar size (within 50% - 200% range)
-                if sizeRatio > 0.5 && sizeRatio < 2.0 {
-                    nearbyStrokesCount += 1
-
-                    // If we find 2+ similar-sized strokes nearby, likely text
-                    if nearbyStrokesCount >= 2 {
-                        return true
-                    }
-                }
-            }
-        }
-
-        return false
+        ShapeDetection.isClosedShape(stroke, among: strokes)
     }
 
     // MARK: - Node Interaction
@@ -760,81 +691,29 @@ public final class MetalInkView: UIView {
 
     /// Find the index of the node at the given point in view space (returns topmost if overlapping).
     /// Expands hit area for small nodes to make them easier to select.
+    /// The current camera paired with the view's size.
+    private var viewTransform: ViewTransform {
+        ViewTransform(camera: camera, viewSize: Vec2(Double(bounds.width), Double(bounds.height)))
+    }
+
+    /// Index of the topmost node at a view point.
+    ///
+    /// Still index-based because the drag machinery tracks `draggingNodeIndex`;
+    /// the hit test itself now lives in `CanvasHitTesting`.
     private func nodeAt(viewPoint: Vec2) -> Int? {
-        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
-        let worldPoint = camera.viewToWorld(viewPoint, viewSize: viewSize)
-
-        // Minimum hit area in world space (makes small nodes easier to tap)
-        let minHitSize = 80.0 / Double(camera.zoom)  // 80 points in view space
-
-        // Check nodes in reverse order (topmost first)
-        for (index, node) in nodes.enumerated().reversed() {
-            // Expand bounds for small nodes
-            let expandedBounds: Rect
-            if node.bounds.width < minHitSize || node.bounds.height < minHitSize {
-                let expandX = max(0, (minHitSize - node.bounds.width) / 2)
-                let expandY = max(0, (minHitSize - node.bounds.height) / 2)
-                expandedBounds = Rect(
-                    x: node.bounds.x - expandX,
-                    y: node.bounds.y - expandY,
-                    width: node.bounds.width + expandX * 2,
-                    height: node.bounds.height + expandY * 2
-                )
-            } else {
-                expandedBounds = node.bounds
-            }
-
-            if expandedBounds.contains(worldPoint) {
-                return index
-            }
-        }
-        return nil
+        guard let hit = CanvasHitTesting.node(at: viewPoint, in: nodes, transform: viewTransform)
+        else { return nil }
+        return nodes.firstIndex(where: { $0.id == hit.id })
     }
 
     /// Find a connection at the given view point (within tap distance).
     private func connectionAt(viewPoint: Vec2) -> Connection? {
-        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
-        let worldPoint = camera.viewToWorld(viewPoint, viewSize: viewSize)
-
-        // Tap threshold in world space (20 points in view space)
-        let tapThreshold = 20.0 / Double(camera.zoom)
-
-        // Check each connection
-        for connection in connections {
-            guard let sourceNode = nodes.first(where: { $0.id == connection.from }),
-                  let targetNode = nodes.first(where: { $0.id == connection.to }) else {
-                continue
-            }
-
-            let start = sourceNode.bounds.center
-            let end = targetNode.bounds.center
-
-            // Calculate distance from point to line segment
-            let distance = distanceFromPointToLineSegment(point: worldPoint, start: start, end: end)
-
-            if distance < tapThreshold {
-                return connection
-            }
-        }
-
-        return nil
-    }
-
-    /// Calculate distance from a point to a line segment.
-    private func distanceFromPointToLineSegment(point: Vec2, start: Vec2, end: Vec2) -> Double {
-        let lineVec = end - start
-        let pointVec = point - start
-        let lineLength = lineVec.length
-
-        guard lineLength > 0 else {
-            return point.distance(to: start)
-        }
-
-        // Project point onto line, clamped to segment
-        let t = max(0, min(1, (pointVec.x * lineVec.x + pointVec.y * lineVec.y) / (lineLength * lineLength)))
-        let projection = start + lineVec * t
-
-        return point.distance(to: projection)
+        CanvasHitTesting.connection(
+            at: viewPoint,
+            in: connections,
+            nodes: nodes,
+            transform: viewTransform
+        )
     }
 
     /// Detect and absorb strokes inside a specific node (one-time action).
@@ -948,25 +827,18 @@ public final class MetalInkView: UIView {
     /// Get the bottom-right resize handle position for a given node (in view space).
     /// Returns nil if the node is not found.
     private func resizeHandlePosition(for nodeId: UUID) -> Vec2? {
-        guard let node = nodes.first(where: { $0.id == nodeId }) else { return nil }
-
-        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
-        let bounds = node.bounds
-
-        // Bottom-right corner in world space, converted to view space
-        let bottomRight = camera.worldToView(Vec2(bounds.maxX, bounds.maxY), viewSize: viewSize)
-        return bottomRight
+        guard let node = canvas.node(withId: nodeId) else { return nil }
+        return CanvasHitTesting.resizeHandlePosition(for: node, transform: viewTransform)
     }
 
     /// Check if a point in view space is near the bottom-right resize handle.
-    /// Returns true if near the handle, false otherwise.
-    /// Handle hit area is 20 points in view space.
     private func isNearResizeHandle(viewPoint: Vec2, for nodeId: UUID) -> Bool {
-        guard let handlePosition = resizeHandlePosition(for: nodeId) else { return false }
-
-        let hitRadius = 20.0  // 20 points hit radius
-        let distance = viewPoint.distance(to: handlePosition)
-        return distance <= hitRadius
+        guard let node = canvas.node(withId: nodeId) else { return false }
+        return CanvasHitTesting.isNearResizeHandle(
+            viewPoint: viewPoint,
+            node: node,
+            transform: viewTransform
+        )
     }
 
     /// Resize a node by dragging the bottom-right handle to endPoint (view space).
@@ -1240,206 +1112,27 @@ public final class MetalInkView: UIView {
 
     /// Rebuild committed geometry from current strokes (used after lasso selection).
     private func rebuildCommittedGeometry() {
-        committedVertices = strokes.flatMap { stroke in
-            Tessellator.tessellate(StrokeSmoother.resample(stroke.points), style: stroke.style)
-        }
-
-        // Add connection arrows (render before nodes so they appear underneath)
-        for connection in connections {
-            committedVertices.append(contentsOf: connectionArrowVertices(connection))
-        }
-
-        // Add node geometry: bounds + contained strokes
-        for node in nodes {
-            // Render node bounds as a thick outline
-            committedVertices.append(contentsOf: nodeOutlineVertices(node))
-
-            // Render strokes inside the node
-            for stroke in node.strokes {
-                committedVertices.append(contentsOf: Tessellator.tessellate(
-                    StrokeSmoother.resample(stroke.points),
-                    style: stroke.style
-                ))
-            }
-
-            // Render resize handles if this node is selected
-            if node.id == selectedNodeId {
-                committedVertices.append(contentsOf: resizeHandleVertices(for: node))
-            }
-        }
-
+        committedVertices = CanvasVertexBuilder.committedGeometry(
+            strokes: strokes,
+            nodes: nodes,
+            connections: connections,
+            highlight: currentHighlight,
+            transform: viewTransform
+        )
         renderer.setCommittedGeometry(committedVertices)
     }
 
-    /// Generate line vertices for the lasso path (in world space).
+    /// What is currently selected, which changes how things are drawn.
+    private var currentHighlight: CanvasVertexBuilder.Highlight {
+        CanvasVertexBuilder.Highlight(
+            selectedNodeId: selectedNodeId,
+            selectedConnectionId: selectedConnectionId
+        )
+    }
+
+    /// Generate line vertices for the in-progress lasso path.
     private func lassoPathVertices() -> [InkVertex] {
-        guard lassoPath.count > 1 else { return [] }
-
-        // Convert lasso from view to world space
-        let viewSize = Vec2(Double(bounds.width), Double(bounds.height))
-        let worldLasso = lassoPath.map { camera.viewToWorld($0, viewSize: viewSize) }
-
-        // Create a stroke-like representation with fixed width
-        let lassoPoints = worldLasso.map { point in
-            InkPoint(
-                position: point,
-                force: 0.5,
-                altitude: .pi / 2,
-                azimuth: 0,
-                timestamp: 0
-            )
-        }
-
-        // Tessellate with a distinct color (blue for lasso)
-        let lassoStyle = InkStyle(
-            red: 0.2,
-            green: 0.5,
-            blue: 1.0,
-            alpha: 0.7,
-            pressure: PressureCurve(minWidth: 2, maxWidth: 2, exponent: 1.0, tiltBroadening: 0)
-        )
-        let resampled = StrokeSmoother.resample(lassoPoints)
-        return Tessellator.tessellate(resampled, style: lassoStyle)
-    }
-
-    /// Generate vertices for a node's bounding box outline.
-    private func nodeOutlineVertices(_ node: Node) -> [InkVertex] {
-        let b = node.bounds
-        let isSelected = (node.id == selectedNodeId)
-
-        // Selected nodes get a brighter color and thicker outline
-        let color = isSelected ? (0.9, 0.6, 0.2) : node.style.borderColor  // Orange for selected, blue for normal
-        let width = isSelected ? node.style.borderWidth * 2.0 : node.style.borderWidth
-
-        // Create four corners
-        let corners = [
-            Vec2(b.x, b.y),
-            Vec2(b.x + b.width, b.y),
-            Vec2(b.x + b.width, b.y + b.height),
-            Vec2(b.x, b.y + b.height),
-            Vec2(b.x, b.y)  // Close the loop
-        ]
-
-        // Convert to InkPoints with fixed pressure
-        let points = corners.map { corner in
-            InkPoint(
-                position: corner,
-                force: 0.5,
-                altitude: .pi / 2,
-                azimuth: 0,
-                timestamp: 0
-            )
-        }
-
-        // Tessellate the outline
-        let outlineStyle = InkStyle(
-            red: color.0,
-            green: color.1,
-            blue: color.2,
-            alpha: 1.0,
-            pressure: PressureCurve(minWidth: width, maxWidth: width, exponent: 1.0, tiltBroadening: 0)
-        )
-        let resampled = StrokeSmoother.resample(points)
-        return Tessellator.tessellate(resampled, style: outlineStyle)
-    }
-
-    /// Generate vertices for the resize handle (bottom-right corner circle) for a selected node.
-    private func resizeHandleVertices(for node: Node) -> [InkVertex] {
-        let b = node.bounds
-        let handleRadius = 10.0 / Double(camera.zoom)  // 10 points in view space, scaled by zoom
-
-        // Bottom-right corner position in world space
-        let center = Vec2(b.x + b.width, b.y + b.height)
-
-        // Handle color (white with blue tint)
-        let handleColor = (0.9, 0.9, 1.0)
-
-        // Create a circle using 16 points
-        let segments = 16
-        var circlePoints: [InkPoint] = []
-
-        for i in 0...segments {
-            let angle = Double(i) * 2.0 * .pi / Double(segments)
-            let x = center.x + handleRadius * cos(angle)
-            let y = center.y + handleRadius * sin(angle)
-
-            circlePoints.append(InkPoint(
-                position: Vec2(x, y),
-                force: 0.5,
-                altitude: .pi / 2,
-                azimuth: 0,
-                timestamp: 0
-            ))
-        }
-
-        // Tessellate the circle
-        let handleStyle = InkStyle(
-            red: handleColor.0,
-            green: handleColor.1,
-            blue: handleColor.2,
-            alpha: 1.0,
-            pressure: PressureCurve(minWidth: 3.0, maxWidth: 3.0, exponent: 1.0, tiltBroadening: 0)
-        )
-        let resampled = StrokeSmoother.resample(circlePoints)
-        return Tessellator.tessellate(resampled, style: handleStyle)
-    }
-
-    /// Generate vertices for a connection arrow from one node to another.
-    private func connectionArrowVertices(_ connection: Connection) -> [InkVertex] {
-        // Find source and target nodes
-        guard let sourceNode = nodes.first(where: { $0.id == connection.from }),
-              let targetNode = nodes.first(where: { $0.id == connection.to }) else {
-            return []
-        }
-
-        let start = sourceNode.bounds.center
-        let end = targetNode.bounds.center
-
-        // Calculate direction vector
-        let direction = end - start
-        guard let normalized = direction.normalized else { return [] }
-
-        // Arrow styling - highlight selected connections
-        let isSelected = (connection.id == selectedConnectionId)
-        let arrowColor = isSelected ? (0.9, 0.6, 0.2) : (0.5, 0.5, 0.5)  // Orange for selected, gray for normal
-        let shaftWidth = isSelected ? 4.0 : 2.0
-        let arrowHeadLength = 20.0
-        let arrowHeadWidth = isSelected ? 16.0 : 12.0
-
-        // Calculate arrow head position (stop before reaching center of target node)
-        let arrowHeadBase = end - normalized * arrowHeadLength
-
-        // Create shaft as a line from start to arrow head base
-        let shaftPoints = [
-            InkPoint(position: start, force: 0.5, altitude: .pi / 2, azimuth: 0, timestamp: 0),
-            InkPoint(position: arrowHeadBase, force: 0.5, altitude: .pi / 2, azimuth: 0, timestamp: 0)
-        ]
-
-        let shaftStyle = InkStyle(
-            red: arrowColor.0,
-            green: arrowColor.1,
-            blue: arrowColor.2,
-            alpha: 1.0,
-            pressure: PressureCurve(minWidth: shaftWidth, maxWidth: shaftWidth, exponent: 1.0, tiltBroadening: 0)
-        )
-
-        var vertices = Tessellator.tessellate(StrokeSmoother.resample(shaftPoints), style: shaftStyle)
-
-        // Create arrow head as a triangle
-        let perpendicular = normalized.perpendicular
-        let headLeft = arrowHeadBase + perpendicular * (arrowHeadWidth / 2)
-        let headRight = arrowHeadBase - perpendicular * (arrowHeadWidth / 2)
-        let headTip = end
-
-        // Create triangle vertices manually
-        let r = Float(arrowColor.0)
-        let g = Float(arrowColor.1)
-        let b = Float(arrowColor.2)
-        vertices.append(InkVertex(x: Float(headLeft.x), y: Float(headLeft.y), r: r, g: g, b: b))
-        vertices.append(InkVertex(x: Float(headRight.x), y: Float(headRight.y), r: r, g: g, b: b))
-        vertices.append(InkVertex(x: Float(headTip.x), y: Float(headTip.y), r: r, g: g, b: b))
-
-        return vertices
+        CanvasVertexBuilder.lassoPath(viewPoints: lassoPath, transform: viewTransform)
     }
 
     public func clear() {

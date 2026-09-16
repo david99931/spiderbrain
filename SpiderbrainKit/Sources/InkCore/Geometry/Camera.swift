@@ -1,4 +1,3 @@
-#if os(iOS)
 import Foundation
 
 /// Camera for the infinite canvas: tracks pan and zoom, transforms between view and world space.
@@ -8,7 +7,7 @@ import Foundation
 /// - **World space**: Infinite canvas coordinates (points). Origin at (0, 0).
 ///
 /// The camera defines what portion of the world is visible in the view.
-public struct Camera {
+public struct Camera: Equatable {
     /// World-space position at the center of the view.
     public var offset: Vec2
 
@@ -78,4 +77,3 @@ public struct Camera {
         offset = worldAnchor - (anchor - viewSize * 0.5) / zoom
     }
 }
-#endif

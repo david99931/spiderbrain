@@ -76,11 +76,8 @@ let package = Package(
         ),
 
         // MARK: - Tests
-        .testTarget(
-            name: "SpiderbrainKitTests",
-            dependencies: ["SpiderbrainKit"]
-        ),
-
+        // The geometry and domain tests all live in InkCoreTests now; the legacy
+        // target holds only UIKit/Metal code, which needs a simulator to exercise.
         .testTarget(
             name: "InkCoreTests",
             dependencies: ["InkCore"]

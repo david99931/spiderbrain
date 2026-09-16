@@ -1,5 +1,5 @@
 import XCTest
-@testable import SpiderbrainKit
+@testable import InkCore
 
 /// These cover the pure-geometry core only. It imports no UIKit and touches no GPU,
 /// which is the whole point of keeping it in its own layer - `swift test` runs the
