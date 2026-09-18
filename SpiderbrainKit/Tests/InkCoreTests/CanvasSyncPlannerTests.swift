@@ -208,17 +208,21 @@ final class CanvasSyncPlannerTests: XCTestCase {
         XCTAssertTrue(CanvasSyncPlanner.plan(for: []).isEmpty)
     }
 
-    /// A cleared canvas makes every other announcement redundant. Clear is not yet
-    /// synced at all, so this documents that the planner emits nothing rather than
-    /// a burst of individual deletions.
-    func testClearedCanvasProducesNoIntents() {
+    /// A cleared canvas is announced as one intent, never as a burst of individual
+    /// deletions — a peer that dropped the connection midway would otherwise be
+    /// left half-cleared.
+    func testClearedCanvasIsAnnouncedAsASingleIntent() {
         let node = makeNode()
         let effects: [CanvasEffect] = [
             .canvasCleared,
             .nodesRemoved(ids: [node.id])
         ]
 
-        XCTAssertTrue(CanvasSyncPlanner.plan(for: effects).isEmpty)
+        XCTAssertEqual(
+            CanvasSyncPlanner.plan(for: effects),
+            [.canvasCleared],
+            "the removals it implies are not announced separately"
+        )
     }
 
     // MARK: - End-to-end against the executor

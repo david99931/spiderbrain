@@ -146,6 +146,10 @@ extension SyncManager: TransportDelegate {
             // For the general SyncManager, connections are handled by MetalStrokeSyncManager
             break
 
+        case .canvasCleared:
+            // For the general SyncManager, the canvas is handled by MetalStrokeSyncManager
+            break
+
         case .correctionApplied(let correction):
             delegate?.syncManager(self, didReceiveCorrection: correction, from: peer)
 

@@ -307,26 +307,6 @@ struct ContentView: View {
                                         .clipShape(RoundedRectangle(cornerRadius: 8))
                                     }
 
-                                    // Batch actions
-                                    if queuedStrokeIds.count > 1 {
-                                        HStack(spacing: 12) {
-                                            Button("Create All") {
-                                                for strokeId in queuedStrokeIds.reversed() {
-                                                    convertStrokeId = strokeId
-                                                    convertNodeToken += 1
-                                                }
-                                                queuedStrokeIds.removeAll()
-                                            }
-                                            .buttonStyle(.borderedProminent)
-                                            .controlSize(.small)
-
-                                            Button("Dismiss All") {
-                                                queuedStrokeIds.removeAll()
-                                            }
-                                            .buttonStyle(.bordered)
-                                            .controlSize(.small)
-                                        }
-                                    }
                                 }
                                 .padding(16)
 
@@ -889,6 +869,10 @@ class SyncCoordinator: ObservableObject {
     func deleteConnection(id: UUID) {
         metalSyncManager?.deleteConnection(id: id)
     }
+
+    func clearCanvas() {
+        metalSyncManager?.clearCanvas()
+    }
 }
 
 extension SyncCoordinator: CanvasSyncDelegate {
@@ -1014,6 +998,13 @@ extension SyncCoordinator: MetalStrokeSyncDelegate {
         }
     }
 
+    func metalStrokeSyncDidClearCanvas(_ manager: MetalStrokeSyncManager, from peer: PeerDevice) {
+        print("🗑 Metal: Received canvas clear from \(peer.name)")
+        DispatchQueue.main.async {
+            self.metalView?.clearReceivedCanvas()
+        }
+    }
+
     func metalStrokeSync(_ manager: MetalStrokeSyncManager, didReceiveFullSync strokes: [Stroke], from peer: PeerDevice) {
         print("📥 Metal: Received full sync with \(strokes.count) strokes from \(peer.name)")
     }
@@ -1092,6 +1083,10 @@ private struct MetalInkCanvas: UIViewRepresentable {
 
         view.onConnectionDeleted = { id in
             syncCoordinator.deleteConnection(id: id)
+        }
+
+        view.onCanvasCleared = {
+            syncCoordinator.clearCanvas()
         }
 
         // Store reference for receiving strokes and nodes

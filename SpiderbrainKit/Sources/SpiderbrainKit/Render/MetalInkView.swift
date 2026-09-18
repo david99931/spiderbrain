@@ -62,6 +62,8 @@ public final class MetalInkView: UIView {
                 onConnectionCreated?(connection)
             case .connectionDeleted(let id):
                 onConnectionDeleted?(id)
+            case .canvasCleared:
+                onCanvasCleared?()
             }
         }
     }
@@ -163,6 +165,9 @@ public final class MetalInkView: UIView {
 
     /// Callback when a connection is deleted (for sync).
     public var onConnectionDeleted: ((UUID) -> Void)?
+
+    /// Callback when the canvas is cleared (for sync).
+    public var onCanvasCleared: (() -> Void)?
 
     /// Current ink settings. Changing this affects the next stroke.
     public var style: InkStyle = .pen
@@ -687,16 +692,25 @@ public final class MetalInkView: UIView {
     }
 
     public func clear() {
-        // Local-only. Clearing wipes strokes, nodes and connections, and the wire
-        // protocol has no atomic "clear canvas" message — syncing it as hundreds of
-        // individual deletions would be non-atomic and could leave a peer showing a
-        // half-cleared canvas. Revisit once nodes and connections have executors.
-        _ = canvas.clear()
+        // Announced as one `canvasCleared` message rather than a deletion per item,
+        // so a peer cannot end up half-cleared if the connection drops midway.
+        broadcast(canvas.clear())
+        resetRenderState()
+    }
+
+    /// Wipe the canvas because a peer did. Not re-announced.
+    public func clearReceivedCanvas() {
+        _ = canvas.applyReceivedClear()
+        resetRenderState()
+    }
+
+    private func resetRenderState() {
         committedVertices.removeAll()
         renderer.setCommittedGeometry([])
         renderer.setLiveGeometry([])
         collector.reset()
         needsRedraw = true
+        onNodesChanged?(nodes)
     }
 
     public func undoLastStroke() {

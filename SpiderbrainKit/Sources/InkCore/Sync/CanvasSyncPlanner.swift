@@ -25,9 +25,10 @@ public enum CanvasSyncPlanner {
     /// 3. **Stroke consumption travels with its node**, so strokes are never
     ///    visible both loose and inside a node.
     public static func plan(for effects: [CanvasEffect]) -> [SyncIntent] {
-        // A cleared canvas makes every other announcement meaningless.
+        // A cleared canvas makes every other announcement meaningless, so it
+        // travels alone rather than alongside the removals it implies.
         if effects.contains(.canvasCleared) {
-            return []
+            return [.canvasCleared]
         }
 
         var removals: [SyncIntent] = []

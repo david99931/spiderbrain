@@ -22,4 +22,8 @@ public enum SyncIntent: Equatable {
 
     case connectionCreated(Connection)
     case connectionDeleted(id: UUID)
+
+    /// Wipe everything. Sent alone: no other announcement means anything once the
+    /// canvas is gone.
+    case canvasCleared
 }

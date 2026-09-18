@@ -48,9 +48,13 @@ public final class CanvasController {
         canvas.execute(.removeLastStroke, origin: .local)
     }
 
-    /// Clear everything. Not broadcast: see the note in `CanvasCommand.clearCanvas`.
     public func clear() -> [CanvasEffect] {
         canvas.execute(.clearCanvas, origin: .local)
+    }
+
+    /// Wipe the canvas because a peer did.
+    public func applyReceivedClear() -> [CanvasEffect] {
+        canvas.execute(.clearCanvas, origin: .remote)
     }
 
     // MARK: - Node creation

@@ -117,6 +117,23 @@ public class MetalStrokeSyncManager {
     }
 
     /// Send connection deletion to all connected peers
+    /// Tell peers to wipe their canvas.
+    ///
+    /// One message rather than a deletion per item: a connection that drops midway
+    /// through a burst would leave the peer showing half a canvas.
+    public func clearCanvas() {
+        let message = SyncMessage.canvasCleared
+        do {
+            let encoder = JSONEncoder()
+            let data = try encoder.encode(message)
+            try transport.broadcast(data: data)
+            print("📤 Synced canvas clear (\(data.count) bytes)")
+        } catch {
+            print("❌ Failed to sync canvas clear: \(error)")
+            delegate?.metalStrokeSync(self, didEncounterError: error)
+        }
+    }
+
     public func deleteConnection(id: UUID) {
         let message = SyncMessage.connectionDeleted(id: id)
         do {
@@ -234,6 +251,10 @@ extension MetalStrokeSyncManager: TransportDelegate {
                 print("📥 Received connection deletion \(id) from \(peer.name)")
                 delegate?.metalStrokeSync(self, didDeleteConnection: id, from: peer)
 
+            case .canvasCleared:
+                print("📥 Received canvas clear from \(peer.name)")
+                delegate?.metalStrokeSyncDidClearCanvas(self, from: peer)
+
             case .fullSync(let strokes):
                 delegate?.metalStrokeSync(self, didReceiveFullSync: strokes, from: peer)
 
@@ -266,6 +287,7 @@ public protocol MetalStrokeSyncDelegate: AnyObject {
     func metalStrokeSync(_ manager: MetalStrokeSyncManager, didDeleteNode id: UUID, from peer: PeerDevice)
     func metalStrokeSync(_ manager: MetalStrokeSyncManager, didReceiveConnection connection: Connection, from peer: PeerDevice)
     func metalStrokeSync(_ manager: MetalStrokeSyncManager, didDeleteConnection id: UUID, from peer: PeerDevice)
+    func metalStrokeSyncDidClearCanvas(_ manager: MetalStrokeSyncManager, from peer: PeerDevice)
     func metalStrokeSync(_ manager: MetalStrokeSyncManager, didReceiveFullSync strokes: [Stroke], from peer: PeerDevice)
     func metalStrokeSync(_ manager: MetalStrokeSyncManager, didEncounterError error: Error)
 }

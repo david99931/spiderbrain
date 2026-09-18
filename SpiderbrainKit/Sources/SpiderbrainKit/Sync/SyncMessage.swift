@@ -13,6 +13,10 @@ public enum SyncMessage: Codable {
     case connectionCreated(Connection)
     case connectionDeleted(id: UUID)
 
+    /// Wipe the whole canvas. One message rather than hundreds of individual
+    /// deletions, so a peer can never end up half-cleared.
+    case canvasCleared
+
     case correctionApplied(CorrectionData)
 
     case fullSync([Stroke])
