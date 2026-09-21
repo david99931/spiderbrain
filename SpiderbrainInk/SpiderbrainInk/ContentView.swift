@@ -36,6 +36,9 @@ struct ContentView: View {
     @State private var showingFullText = false
     @State private var fullTextToShow: String = ""
     @State private var correctionNodeData: CorrectionNodeData?
+    @State private var editingTextNode: TextEditingNode?
+    @State private var setTextToken = 0
+    @State private var pendingText: (nodeId: UUID, text: String, fitting: Rect)? = nil
     @State private var showingMLTraining = false
     @State private var showingNetworkTest = false
 
@@ -47,6 +50,12 @@ struct ContentView: View {
     @StateObject private var syncCoordinator = SyncCoordinator()
     @State private var isSyncActive = false
     @State private var connectedPeers: [PeerDevice] = []
+
+    /// A node whose text is being edited in the sheet.
+    struct TextEditingNode: Identifiable {
+        let id: UUID
+        let existingText: String
+    }
 
     struct CorrectionNodeData: Identifiable {
         let id: UUID
@@ -86,6 +95,8 @@ struct ContentView: View {
                         deleteConnectionToken: deleteConnectionToken,
                         recognizeNodeId: recognizeNodeId,
                         recognizeToken: recognizeToken,
+                        pendingText: pendingText,
+                        setTextToken: setTextToken,
                         syncCoordinator: syncCoordinator,
                         onStats: { stats = $0 },
                         onNodesUpdate: { _ in
@@ -106,7 +117,8 @@ struct ContentView: View {
                                     bounds: node.bounds,
                                     style: node.style,
                                     boundaryStroke: node.boundaryStroke,
-                                    recognizedText: node.recognizedText  // Include recognized text
+                                    recognizedText: node.recognizedText,
+                                    text: node.text
                                 )
                             }
 
@@ -502,6 +514,20 @@ struct ContentView: View {
                                             Spacer()
 
                                             VStack(spacing: 4) {
+                                                // Type text into this node
+                                                Button(action: {
+                                                    editingTextNode = TextEditingNode(
+                                                        id: node.id,
+                                                        existingText: node.text ?? ""
+                                                    )
+                                                }) {
+                                                    Image(systemName: "keyboard")
+                                                        .font(.caption)
+                                                        .foregroundStyle(.purple)
+                                                }
+                                                .buttonStyle(.bordered)
+                                                .controlSize(.small)
+
                                                 // Text recognition button
                                                 Button(action: {
                                                     recognizeNodeId = node.id
@@ -700,6 +726,21 @@ struct ContentView: View {
                         bounds: data.bounds
                     )
                 }
+            )
+        }
+        .sheet(item: $editingTextNode) { editing in
+            NodeTextEditor(
+                initialText: editing.existingText,
+                onCommit: { text in
+                    pendingText = (
+                        nodeId: editing.id,
+                        text: text,
+                        fitting: NodeTextMeasurer.boundsFitting(text)
+                    )
+                    setTextToken += 1
+                    editingTextNode = nil
+                },
+                onCancel: { editingTextNode = nil }
             )
         }
         .sheet(isPresented: $showingMLTraining) {
@@ -1074,6 +1115,8 @@ private struct MetalInkCanvas: UIViewRepresentable {
     var deleteConnectionToken: Int
     var recognizeNodeId: UUID?
     var recognizeToken: Int
+    var pendingText: (nodeId: UUID, text: String, fitting: Rect)?
+    var setTextToken: Int
     var syncCoordinator: SyncCoordinator
     var onStats: (MetalInkView.HUDStats) -> Void
     var onNodesUpdate: ([Node]) -> Void
@@ -1140,6 +1183,7 @@ private struct MetalInkCanvas: UIViewRepresentable {
         context.coordinator.lastDetect = detectToken
         context.coordinator.lastDelete = deleteToken
         context.coordinator.lastRecognize = recognizeToken
+        context.coordinator.lastSetText = setTextToken
         return view
     }
 
@@ -1191,6 +1235,13 @@ private struct MetalInkCanvas: UIViewRepresentable {
             view.convertStrokeToNodeWithAbsorb(strokeId: strokeId)
         }
 
+        // Handle typed text
+        if context.coordinator.lastSetText != setTextToken,
+           let pending = pendingText {
+            context.coordinator.lastSetText = setTextToken
+            view.setNodeText(pending.text, onNodeId: pending.nodeId, fittingBounds: pending.fitting)
+        }
+
         // Handle text recognition
         if context.coordinator.lastRecognize != recognizeToken,
            let nodeId = recognizeNodeId {
@@ -1223,6 +1274,7 @@ private struct MetalInkCanvas: UIViewRepresentable {
         var lastDelete = 0
         var lastDeleteConnection = 0
         var lastRecognize = 0
+        var lastSetText = 0
         var shouldClearConnectionSelection = false
     }
 }

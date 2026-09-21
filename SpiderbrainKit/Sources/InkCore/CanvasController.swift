@@ -208,6 +208,32 @@ public final class CanvasController {
         return canvas.execute(.updateNode(node), origin: .local)
     }
 
+    /// Set the text a user typed into a node.
+    ///
+    /// - Parameter fittingBounds: a box large enough to hold the rendered text,
+    ///   measured by the caller — text layout needs a font, which the domain has
+    ///   no business knowing. The node grows to fit but never shrinks, so editing
+    ///   a node down to a shorter string leaves the box where the user last had it.
+    public func setText(
+        _ text: String?,
+        onNodeId nodeId: UUID,
+        fittingBounds: Rect? = nil
+    ) -> [CanvasEffect] {
+        guard var node = canvas.node(withId: nodeId) else { return [] }
+
+        node.text = text
+        if let fittingBounds {
+            node.bounds = Rect(
+                x: node.bounds.x,
+                y: node.bounds.y,
+                width: max(node.bounds.width, fittingBounds.width),
+                height: max(node.bounds.height, fittingBounds.height)
+            )
+        }
+
+        return canvas.execute(.updateNode(node), origin: .local)
+    }
+
     /// Record recognized handwriting on a node.
     ///
     /// The recognition itself runs on the platform side; only the result lands here.

@@ -613,6 +613,25 @@ public final class MetalInkView: UIView {
         }
     }
 
+    /// Store text typed into a node.
+    ///
+    /// - Parameter fittingBounds: a box big enough to render the text, measured by
+    ///   the caller. The node grows to fit but never shrinks.
+    public func setNodeText(_ text: String, onNodeId nodeId: UUID, fittingBounds: Rect) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effects = canvas.setText(
+            trimmed.isEmpty ? nil : trimmed,
+            onNodeId: nodeId,
+            fittingBounds: fittingBounds
+        )
+        guard !effects.isEmpty else { return }
+
+        broadcast(effects)
+        rebuildCommittedGeometry()
+        needsRedraw = true
+        onNodesChanged?(nodes)
+    }
+
     /// Delete a node by its ID, returning its strokes to the canvas.
     public func deleteNode(id nodeId: UUID) {
         // The executor returns the strokes and drops the node's edges in one step.
