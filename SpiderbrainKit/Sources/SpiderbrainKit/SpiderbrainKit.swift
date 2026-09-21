@@ -2,3 +2,4 @@
 // Re-exported here so existing `import SpiderbrainKit` call sites keep working
 // while the rest of the code migrates out of this legacy target.
 @_exported import InkCore
+@_exported import InkPrompt

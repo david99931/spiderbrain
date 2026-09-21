@@ -39,6 +39,10 @@ struct ContentView: View {
     @State private var showingMLTraining = false
     @State private var showingNetworkTest = false
 
+    // TEMPORARY: proof of life for the Anthropic call.
+    @State private var promptTestResult: String? = nil
+    @State private var promptTestInFlight = false
+
     // Sync state
     @StateObject private var syncCoordinator = SyncCoordinator()
     @State private var isSyncActive = false
@@ -198,6 +202,21 @@ struct ContentView: View {
                 Button("Undo") { undoToken += 1 }
                     .disabled(engine != .metal)
                 Button("Clear") { clearToken += 1 }
+
+                // TEMPORARY: proof of life for the Anthropic call. Remove once
+                // prompting is wired to nodes.
+                Button(promptTestResult == nil ? "Test LLM" : "Test LLM ↻") {
+                    testPromptService()
+                }
+                .disabled(promptTestInFlight)
+            }
+
+            if let result = promptTestResult {
+                Text(result)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(4)
             }
 
             if engine == .metal {
@@ -758,6 +777,29 @@ struct ContentView: View {
     }
 
     // MARK: - Canvas Sync
+
+    /// TEMPORARY: sends one fixed prompt to confirm the key, the request shape,
+    /// and the response parsing all work. Remove once prompting is wired to nodes.
+    private func testPromptService() {
+        guard let apiKey = Secrets.anthropicAPIKey else {
+            promptTestResult = "No API key — check Secrets.plist is in the bundle."
+            return
+        }
+
+        promptTestInFlight = true
+        promptTestResult = "Asking…"
+
+        Task {
+            let service = AnthropicPromptService(apiKey: apiKey)
+            do {
+                let reply = try await service.complete(prompt: "Say hello in exactly five words.")
+                promptTestResult = reply
+            } catch {
+                promptTestResult = "Failed: \(error)"
+            }
+            promptTestInFlight = false
+        }
+    }
 
     private func toggleSync() {
         if isSyncActive {

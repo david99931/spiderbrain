@@ -17,6 +17,7 @@ let package = Package(
         .library(name: "InkInput", targets: ["InkInput"]),
         .library(name: "InkSync", targets: ["InkSync"]),
         .library(name: "InkPersistence", targets: ["InkPersistence"]),
+        .library(name: "InkPrompt", targets: ["InkPrompt"]),
         .library(name: "InkUI", targets: ["InkUI"])
     ],
     targets: [
@@ -24,7 +25,7 @@ let package = Package(
         // Re-exports InkCore so existing call sites keep compiling unchanged.
         .target(
             name: "SpiderbrainKit",
-            dependencies: ["InkCore"],
+            dependencies: ["InkCore", "InkPrompt"],
             path: "Sources/SpiderbrainKit"
         ),
 
@@ -60,6 +61,14 @@ let package = Package(
             name: "InkPersistence",
             dependencies: ["InkCore"],
             path: "Sources/InkPersistence"
+        ),
+
+        // Talks to the Anthropic API. Separate from InkCore so the domain stays
+        // free of networking; InkCore owns only the protocol.
+        .target(
+            name: "InkPrompt",
+            dependencies: ["InkCore"],
+            path: "Sources/InkPrompt"
         ),
 
         // Composition layer - depends on all features
