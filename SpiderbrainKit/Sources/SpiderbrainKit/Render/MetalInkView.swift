@@ -172,6 +172,23 @@ public final class MetalInkView: UIView {
     /// Callback when the canvas is cleared (for sync).
     public var onCanvasCleared: (() -> Void)?
 
+    /// What a touch means right now.
+    public enum InteractionMode {
+        /// Pencil and pointer draw ink.
+        case draw
+        /// Nothing draws; taps select, double taps edit text.
+        case select
+    }
+
+    /// Whether touches draw or select. Drawing is the default.
+    public var interactionMode: InteractionMode = .draw {
+        didSet {
+            guard interactionMode != oldValue else { return }
+            // Leaving select mode should not strand a cursor on the canvas.
+            if interactionMode == .draw { textOverlay.endEditing(true) }
+        }
+    }
+
     /// Current ink settings. Changing this affects the next stroke.
     public var style: InkStyle = .pen
 
@@ -294,9 +311,21 @@ public final class MetalInkView: UIView {
         pinchGesture.delegate = self
         addGestureRecognizer(pinchGesture)
 
+        // Double tap puts the cursor in a node's text. Declared before the single
+        // tap so the single tap can be made to wait on it.
+        let doubleTapGesture = UITapGestureRecognizer(
+            target: self,
+            action: #selector(handleDoubleTap)
+        )
+        doubleTapGesture.numberOfTapsRequired = 2
+        doubleTapGesture.delegate = self
+        addGestureRecognizer(doubleTapGesture)
+
         // Tap gesture for node selection
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
         tapGesture.delegate = self
+        // Otherwise a double tap also selects on its way to editing.
+        tapGesture.require(toFail: doubleTapGesture)
         addGestureRecognizer(tapGesture)
 
         let link = CADisplayLink(target: self, selector: #selector(step))
@@ -331,8 +360,14 @@ public final class MetalInkView: UIView {
     /// A pointer reports no force, so `StrokeInputCollector` gives it a fixed
     /// mid-pressure and strokes come out at an even width.
     private func isDrawingTouch(_ touch: UITouch) -> Bool {
-        touch.type == .pencil || touch.type == .indirectPointer
+        // In select mode nothing draws, so a click is free to mean "select" —
+        // which is what makes tap and double-tap work on a Mac, where a primary
+        // click would otherwise be claimed as the start of a stroke before any
+        // gesture recognizer gets a say.
+        guard interactionMode == .draw else { return false }
+        return touch.type == .pencil || touch.type == .indirectPointer
     }
+
 
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first else { return }
@@ -1023,7 +1058,16 @@ public final class MetalInkView: UIView {
         needsRedraw = true
     }
 
+    /// Double tap on a node starts editing its text.
+    @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+        textOverlay.beginEditing(at: gesture.location(in: textOverlay))
+    }
+
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+        // Tapping the canvas dismisses any text cursor. Nothing else tells the
+        // overlay the user has moved on.
+        textOverlay.endEditing(true)
+
         let location = gesture.location(in: self)
         let viewPoint = Vec2(Double(location.x), Double(location.y))
 
@@ -1095,15 +1139,19 @@ extension MetalInkView: UIGestureRecognizerDelegate {
 
     /// Only allow finger touches for gestures, not whatever is drawing.
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // Taps come first, before the drawing-touch rejection below. On a Mac a
+        // trackpad click is an `.indirectPointer`, which counts as a drawing
+        // touch — rejecting it here would mean a click could only ever start a
+        // stroke, never select a node. A click that moves still draws, because
+        // the tap recognizer fails as soon as the touch travels.
+        if gestureRecognizer is UITapGestureRecognizer {
+            return true
+        }
+
         // A drawing touch must not also pan or zoom, or a mouse drag on the Mac
         // would draw and pan the camera at the same time.
         if isDrawingTouch(touch) {
             return false
-        }
-
-        // For tap gestures, always allow them (they handle selection/deselection)
-        if gestureRecognizer is UITapGestureRecognizer {
-            return true
         }
 
         // For pan gestures on resize handle, don't allow the gesture

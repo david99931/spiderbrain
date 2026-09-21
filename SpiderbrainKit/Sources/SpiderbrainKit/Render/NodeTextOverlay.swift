@@ -32,8 +32,6 @@ public final class NodeTextOverlay: UIView {
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
-        // The overlay itself is just a container; taps land on the text views or
-        // fall through to the canvas underneath.
         backgroundColor = .clear
         isOpaque = false
     }
@@ -43,11 +41,40 @@ public final class NodeTextOverlay: UIView {
         fatalError("Use init(frame:)")
     }
 
-    /// Only the text views should catch touches; everywhere else belongs to the
-    /// canvas below, so drawing over an empty area still works.
+    /// Touches pass straight through unless a text view is actively being edited.
+    ///
+    /// Every node has a text view, including empty ones, so letting them catch
+    /// touches would mean a tap anywhere on a node hit an invisible box instead of
+    /// selecting, dragging, or drawing. The overlay's own double-tap recognizer
+    /// (added in `init`) is what activates a text view; until then the overlay is
+    /// invisible to touch.
     public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
-        return hit === self ? nil : hit
+
+        // Once a text view is first responder it needs its touches back, for the
+        // cursor, selection handles, and the edit menu.
+        if let textView = hit as? UITextView, textView.isFirstResponder {
+            return textView
+        }
+        return nil
+    }
+
+    /// Put the cursor in whichever node covers this point.
+    ///
+    /// Driven from the canvas rather than a recognizer of our own: `hitTest`
+    /// returns nil while nothing is being edited, which takes this view out of the
+    /// responder chain entirely — gestures attached here would never fire.
+    ///
+    /// - Returns: whether a node's text was actually entered.
+    @discardableResult
+    public func beginEditing(at point: CGPoint) -> Bool {
+        guard let view = textViews.values.first(where: { $0.frame.contains(point) })
+        else { return false }
+
+        view.isEditable = true
+        view.isSelectable = true
+        view.becomeFirstResponder()
+        return true
     }
 
     /// Bring the overlay in line with the nodes and the camera.
@@ -56,16 +83,17 @@ public final class NodeTextOverlay: UIView {
     /// reads the camera — anywhere else and the text lags the ink by a frame
     /// while panning.
     public func sync(nodes: [Node], transform: ViewTransform) {
-        let withText = nodes.filter { ($0.text?.isEmpty == false) }
-        let liveIds = Set(withText.map(\.id))
+        // Every node gets a text view, not just the ones with text — an empty
+        // node has to be double-tappable to start typing into it.
+        let liveIds = Set(nodes.map(\.id))
 
-        // Drop views for nodes that lost their text or went away.
+        // Drop views for nodes that went away.
         for (id, view) in textViews where !liveIds.contains(id) {
             view.removeFromSuperview()
             textViews.removeValue(forKey: id)
         }
 
-        for node in withText {
+        for node in nodes {
             let view = textViews[node.id] ?? makeTextView(for: node.id)
 
             // Don't fight the user: leave the text alone while they are typing in it.
@@ -110,6 +138,16 @@ public final class NodeTextOverlay: UIView {
         view.delegate = self
         view.nodeId = nodeId
 
+        // Inert until double-tapped, so a single tap passes through to the canvas
+        // and selects, drags, or resizes the node like any other.
+        //
+        // `isSelectable` has to go too, not just `isEditable`: a selectable text
+        // view still consumes touches for its own selection gestures, which is
+        // what was swallowing every tap. The cost is that selecting text to copy
+        // requires entering the node first — the usual behaviour for a field.
+        view.isEditable = false
+        view.isSelectable = false
+
         addSubview(view)
         textViews[nodeId] = view
         return view
@@ -149,6 +187,10 @@ extension NodeTextOverlay: UITextViewDelegate {
     }
 
     public func textViewDidEndEditing(_ textView: UITextView) {
+        // Back to inert, so single taps reach the canvas again.
+        textView.isEditable = false
+        textView.isSelectable = false
+
         guard let nodeId = textView.nodeId else { return }
         onTextEdited?(nodeId, textView.text ?? "")
     }
