@@ -31,6 +31,9 @@ public final class MetalInkView: UIView {
     private let collector = StrokeInputCollector()
     private var displayLink: CADisplayLink?
 
+    /// Node text, drawn as real UIKit text views above the canvas.
+    private let textOverlay = NodeTextOverlay(frame: .zero)
+
     // MARK: - Data Storage
 
     /// Owns the canvas and every operation on it. The view holds no canvas state
@@ -248,6 +251,30 @@ public final class MetalInkView: UIView {
         // throughput for responsiveness.
         metalLayer.maximumDrawableCount = 2
 
+        // Node text is drawn by real UIKit views above the Metal content.
+        addSubview(textOverlay)
+        textOverlay.onTextEdited = { [weak self] nodeId, text in
+            guard let self else { return }
+            let fitted = self.canvas.node(withId: nodeId)?.bounds
+            self.setNodeText(
+                text,
+                onNodeId: nodeId,
+                fittingBounds: fitted ?? Rect(x: 0, y: 0, width: 0, height: 0)
+            )
+        }
+        textOverlay.onTextSizeChanged = { [weak self] nodeId, width, height in
+            guard let self, let node = self.canvas.node(withId: nodeId) else { return }
+            // Grow while typing; the executor keeps this from ever shrinking.
+            let effects = self.canvas.setText(
+                node.text,
+                onNodeId: nodeId,
+                fittingBounds: Rect(x: 0, y: 0, width: width, height: height)
+            )
+            guard !effects.isEmpty else { return }
+            self.rebuildCommittedGeometry()
+            self.needsRedraw = true
+        }
+
         // One-finger pan gesture (for easy navigation)
         let oneFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handlePan))
         oneFingerPan.minimumNumberOfTouches = 1
@@ -292,6 +319,7 @@ public final class MetalInkView: UIView {
             width: bounds.width * scale,
             height: bounds.height * scale
         )
+        textOverlay.frame = bounds
         needsRedraw = true
     }
 
@@ -899,6 +927,10 @@ public final class MetalInkView: UIView {
         needsRedraw = false
 
         renderer.draw(in: metalLayer, alpha: style.alpha, cameraOffset: camera.offset, cameraZoom: camera.zoom)
+
+        // Same frame as the draw above: anywhere else and the text slides against
+        // the ink while panning.
+        textOverlay.sync(nodes: nodes, transform: viewTransform)
 
         onStatsUpdate?(HUDStats(
             strokeCount: strokes.count,
