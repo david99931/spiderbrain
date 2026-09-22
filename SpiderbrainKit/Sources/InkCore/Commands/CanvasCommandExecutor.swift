@@ -115,6 +115,9 @@ public final class CanvasCommandExecutor {
                 consumingStrokes: consumedStrokeIds
             )
 
+        case .createNodeLinked(let node, let sourceId):
+            return createNodeLinked(node, from: sourceId)
+
         case .connect(let sourceId, let targetId):
             return connect(from: sourceId, to: targetId)
 
@@ -251,6 +254,21 @@ public final class CanvasCommandExecutor {
     }
 
     // MARK: - Connection operations
+
+    /// Add a node and immediately point an existing node at it.
+    ///
+    /// Refuses outright if the source is gone — a linked node with nothing linking
+    /// to it is not what the caller asked for, and silently dropping just the edge
+    /// would leave an orphan behind.
+    private func createNodeLinked(_ node: Node, from sourceId: UUID) -> [CanvasEffect] {
+        guard nodeStorage.contains(where: { $0.id == sourceId }) else { return [] }
+        guard !nodeStorage.contains(where: { $0.id == node.id }) else { return [] }
+
+        nodeStorage.append(node)
+        var effects: [CanvasEffect] = [.nodeCreated(node)]
+        effects.append(contentsOf: connect(from: sourceId, to: node.id))
+        return effects
+    }
 
     private func connect(from sourceId: UUID, to targetId: UUID) -> [CanvasEffect] {
         guard sourceId != targetId else { return [] }

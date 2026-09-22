@@ -234,6 +234,39 @@ public final class CanvasController {
         return canvas.execute(.updateNode(node), origin: .local)
     }
 
+    /// Put a reply on the canvas as its own node, pointed at by the node that
+    /// asked the question.
+    ///
+    /// - Parameters:
+    ///   - text: the reply.
+    ///   - sourceId: the node whose contents were the prompt.
+    ///   - size: how big the reply's box needs to be, measured by the caller —
+    ///     text layout needs a font, which the domain has no business knowing.
+    /// - Returns: the effects, empty if the source node has since been deleted.
+    public func addReply(
+        _ text: String,
+        answering sourceId: UUID,
+        size: Vec2
+    ) -> [CanvasEffect] {
+        guard let source = canvas.node(withId: sourceId) else { return [] }
+
+        // Sit to the right of the question, top-aligned, with a gap wide enough
+        // that the arrow between them is visible.
+        let gap = 60.0
+        let reply = Node(
+            strokes: [],
+            bounds: Rect(
+                x: source.bounds.maxX + gap,
+                y: source.bounds.y,
+                width: size.x,
+                height: size.y
+            ),
+            text: text
+        )
+
+        return canvas.execute(.createNodeLinked(reply, from: sourceId), origin: .local)
+    }
+
     /// Record recognized handwriting on a node.
     ///
     /// The recognition itself runs on the platform side; only the result lands here.

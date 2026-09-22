@@ -359,6 +359,16 @@ public final class MetalInkView: UIView {
     /// Apple Pencil on iPad, and trackpad or mouse when the app runs on a Mac.
     /// A pointer reports no force, so `StrokeInputCollector` gives it a fixed
     /// mid-pressure and strokes come out at an even width.
+    /// Whether a touch manipulates the canvas rather than drawing on it —
+    /// selecting, dragging, grabbing a resize handle.
+    ///
+    /// A finger always manipulates. A pointer manipulates only when it isn't
+    /// drawing, which on a Mac means whenever select mode is on: there is one
+    /// button, so it has to do both jobs depending on the mode.
+    private func isManipulationTouch(_ touch: UITouch) -> Bool {
+        touch.type == .direct || (touch.type == .indirectPointer && !isDrawingTouch(touch))
+    }
+
     private func isDrawingTouch(_ touch: UITouch) -> Bool {
         // In select mode nothing draws, so a click is free to mean "select" —
         // which is what makes tap and double-tap work on a Mac, where a primary
@@ -372,8 +382,8 @@ public final class MetalInkView: UIView {
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first else { return }
 
-        // Handle finger touches for node selection and resize
-        if touch.type == .direct {
+        // Finger, or pointer in select mode: manipulate rather than draw.
+        if isManipulationTouch(touch) {
             let location = touch.location(in: self)
             let viewPoint = Vec2(Double(location.x), Double(location.y))
 
@@ -424,8 +434,8 @@ public final class MetalInkView: UIView {
     public override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first else { return }
 
-        // Handle finger drags for resize
-        if touch.type == .direct {
+        // Finger, or pointer in select mode.
+        if isManipulationTouch(touch) {
             if activeResizeHandle,
                let selectedId = selectedNodeId {
                 // Get all coalesced touches for smoother updates
@@ -453,8 +463,8 @@ public final class MetalInkView: UIView {
     public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first else { return }
 
-        // Handle finger touch end for resize
-        if touch.type == .direct {
+        // Finger, or pointer in select mode.
+        if isManipulationTouch(touch) {
             if activeResizeHandle {
                 // Finish resize
                 activeResizeHandle = false
@@ -687,6 +697,21 @@ public final class MetalInkView: UIView {
             onNodeId: nodeId,
             fittingBounds: fittingBounds
         )
+        guard !effects.isEmpty else { return }
+
+        broadcast(effects)
+        rebuildCommittedGeometry()
+        needsRedraw = true
+        onNodesChanged?(nodes)
+    }
+
+    /// Put a model reply on the canvas as its own node, linked back to the node
+    /// that was asked.
+    ///
+    /// - Parameter size: how big the reply's box needs to be, measured by the
+    ///   caller — text layout needs a font, which the canvas layer does not own.
+    public func addReply(_ text: String, answering sourceId: UUID, size: Vec2) {
+        let effects = canvas.addReply(text, answering: sourceId, size: size)
         guard !effects.isEmpty else { return }
 
         broadcast(effects)

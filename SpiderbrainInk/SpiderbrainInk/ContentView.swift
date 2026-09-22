@@ -41,9 +41,21 @@ struct ContentView: View {
     @State private var showingMLTraining = false
     @State private var showingNetworkTest = false
 
-    // TEMPORARY: proof of life for the Anthropic call.
-    @State private var promptTestResult: String? = nil
-    @State private var promptTestInFlight = false
+    /// The most recent reply, shown under the toolbar.
+    ///
+    /// TEMPORARY: replies belong in a node of their own, connected to the node
+    /// that asked. This line exists only to prove the per-node round trip works.
+    @State private var latestReply: String? = nil
+
+    /// Nodes with a request in flight, for the spinner and to stop double-firing.
+    @State private var promptingNodeIds: Set<UUID> = []
+
+    /// A reply waiting to be placed on the canvas.
+    @State private var pendingReply: (sourceId: UUID, text: String, size: Vec2)? = nil
+    @State private var addReplyToken = 0
+
+    /// In-flight requests by node, so a second tap can cancel the first.
+    @State private var promptTasks: [UUID: Task<Void, Never>] = [:]
 
     // Sync state
     @StateObject private var syncCoordinator = SyncCoordinator()
@@ -88,6 +100,8 @@ struct ContentView: View {
                         recognizeToken: recognizeToken,
                         pendingText: pendingText,
                         setTextToken: setTextToken,
+                        pendingReply: pendingReply,
+                        addReplyToken: addReplyToken,
                         syncCoordinator: syncCoordinator,
                         onStats: { stats = $0 },
                         onNodesUpdate: { _ in
@@ -194,15 +208,9 @@ struct ContentView: View {
                 Button("Undo") { undoToken += 1 }
                 Button("Clear") { clearToken += 1 }
 
-                // TEMPORARY: proof of life for the Anthropic call. Remove once
-                // prompting is wired to nodes.
-                Button(promptTestResult == nil ? "Test LLM" : "Test LLM ↻") {
-                    testPromptService()
-                }
-                .disabled(promptTestInFlight)
             }
 
-            if let result = promptTestResult {
+            if let result = latestReply {
                 Text(result)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -487,6 +495,23 @@ struct ContentView: View {
 
                                             VStack(spacing: 4) {
                                                 // Type text into this node
+                                                // Ask the model about this node
+                                                Button(action: {
+                                                    promptNode(node)
+                                                }) {
+                                                    if promptingNodeIds.contains(node.id) {
+                                                        ProgressView()
+                                                            .controlSize(.mini)
+                                                    } else {
+                                                        Image(systemName: "sparkles")
+                                                            .font(.caption)
+                                                            .foregroundStyle(.orange)
+                                                    }
+                                                }
+                                                .buttonStyle(.bordered)
+                                                .controlSize(.small)
+                                                .disabled(node.promptText == nil)
+
                                                 Button(action: {
                                                     editingTextNode = TextEditingNode(
                                                         id: node.id,
@@ -791,26 +816,44 @@ struct ContentView: View {
 
     // MARK: - Canvas Sync
 
-    /// TEMPORARY: sends one fixed prompt to confirm the key, the request shape,
-    /// and the response parsing all work. Remove once prompting is wired to nodes.
-    private func testPromptService() {
+    /// Ask the model about a node's contents.
+    ///
+    /// The reply currently lands in the line under the toolbar. Step 4 turns it
+    /// into a node of its own, connected back to this one.
+    private func promptNode(_ node: Node) {
+        guard let prompt = node.promptText else { return }
         guard let apiKey = Secrets.anthropicAPIKey else {
-            promptTestResult = "No API key — check Secrets.plist is in the bundle."
+            latestReply = "No API key — check Secrets.plist is in the bundle."
             return
         }
 
-        promptTestInFlight = true
-        promptTestResult = "Asking…"
+        // A second tap replaces the first request rather than racing it.
+        promptTasks[node.id]?.cancel()
 
-        Task {
+        promptingNodeIds.insert(node.id)
+        latestReply = "Asking…"
+
+        promptTasks[node.id] = Task {
             let service = AnthropicPromptService(apiKey: apiKey)
             do {
-                let reply = try await service.complete(prompt: "Say hello in exactly five words.")
-                promptTestResult = reply
+                let reply = try await service.complete(prompt: prompt)
+                guard !Task.isCancelled else { return }
+
+                let fitted = NodeTextMeasurer.boundsFitting(reply)
+                pendingReply = (
+                    sourceId: node.id,
+                    text: reply,
+                    size: Vec2(fitted.width, fitted.height)
+                )
+                addReplyToken += 1
+                latestReply = nil
             } catch {
-                promptTestResult = "Failed: \(error)"
+                guard !Task.isCancelled else { return }
+                latestReply = "Failed: \(error)"
             }
-            promptTestInFlight = false
+
+            promptingNodeIds.remove(node.id)
+            promptTasks[node.id] = nil
         }
     }
 
@@ -1089,6 +1132,8 @@ private struct MetalInkCanvas: UIViewRepresentable {
     var recognizeToken: Int
     var pendingText: (nodeId: UUID, text: String, fitting: Rect)?
     var setTextToken: Int
+    var pendingReply: (sourceId: UUID, text: String, size: Vec2)?
+    var addReplyToken: Int
     var syncCoordinator: SyncCoordinator
     var onStats: (MetalInkView.HUDStats) -> Void
     var onNodesUpdate: ([Node]) -> Void
@@ -1156,6 +1201,7 @@ private struct MetalInkCanvas: UIViewRepresentable {
         context.coordinator.lastDelete = deleteToken
         context.coordinator.lastRecognize = recognizeToken
         context.coordinator.lastSetText = setTextToken
+        context.coordinator.lastAddReply = addReplyToken
         return view
     }
 
@@ -1207,6 +1253,13 @@ private struct MetalInkCanvas: UIViewRepresentable {
             view.convertStrokeToNodeWithAbsorb(strokeId: strokeId)
         }
 
+        // Place a model reply as its own node
+        if context.coordinator.lastAddReply != addReplyToken,
+           let reply = pendingReply {
+            context.coordinator.lastAddReply = addReplyToken
+            view.addReply(reply.text, answering: reply.sourceId, size: reply.size)
+        }
+
         // Handle typed text
         if context.coordinator.lastSetText != setTextToken,
            let pending = pendingText {
@@ -1247,6 +1300,7 @@ private struct MetalInkCanvas: UIViewRepresentable {
         var lastDeleteConnection = 0
         var lastRecognize = 0
         var lastSetText = 0
+        var lastAddReply = 0
         var shouldClearConnectionSelection = false
     }
 }

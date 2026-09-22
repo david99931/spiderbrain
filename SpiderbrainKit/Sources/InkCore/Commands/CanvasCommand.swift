@@ -55,6 +55,14 @@ public enum CanvasCommand: Equatable {
 
     /// Connect one node to another. Rejects self-loops and duplicates, and
     /// requires both endpoints to exist.
+    /// Create a node and an edge pointing at it, in one step.
+    ///
+    /// Separate `createNode` + `connect` commands would let a peer observe the new
+    /// node with nothing pointing at it, and an edge that arrives before its
+    /// endpoint is dropped outright. A reply that has lost its question is worse
+    /// than no reply, so the two travel together.
+    case createNodeLinked(Node, from: UUID)
+
     case connect(from: UUID, to: UUID)
 
     /// Remove a connection by id. Ignored if not present.
