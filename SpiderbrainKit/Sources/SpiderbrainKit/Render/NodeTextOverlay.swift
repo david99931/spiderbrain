@@ -22,6 +22,12 @@ public final class NodeTextOverlay: UIView {
     /// the node can grow to fit as the user types.
     public var onTextSizeChanged: ((UUID, Double, Double) -> Void)?
 
+    /// Called when the user asks to expand on a highlighted part of a node.
+    ///
+    /// Carries the node, the highlighted phrase, and the whole of the node's text —
+    /// a fragment on its own is usually not a question anyone can answer.
+    public var onExpandSelection: ((UUID, String, String) -> Void)?
+
     /// Font size in world units, so text scales with the canvas the way ink does.
     private static let worldFontSize: Double = 17
 
@@ -49,14 +55,24 @@ public final class NodeTextOverlay: UIView {
     /// (added in `init`) is what activates a text view; until then the overlay is
     /// invisible to touch.
     public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        let hit = super.hitTest(point, with: event)
+        // Ask directly rather than filtering `super`'s answer: an inert text view
+        // may not come back from `super.hitTest` at all, and the only question
+        // that matters here is whether an *editing* view covers this point. If one
+        // does it needs the touch, for the caret, selection handles and the menu.
+        // Otherwise the overlay is invisible and the canvas gets it.
+        guard let editing = textViews.values.first(where: {
+            $0.isFirstResponder && $0.frame.contains(point)
+        }) else { return nil }
 
-        // Once a text view is first responder it needs its touches back, for the
-        // cursor, selection handles, and the edit menu.
-        if let textView = hit as? UITextView, textView.isFirstResponder {
-            return textView
-        }
-        return nil
+        return editing.hitTest(convert(point, to: editing), with: event) ?? editing
+    }
+
+    /// Whether a point falls inside a text view the user is currently editing.
+    ///
+    /// The canvas asks this before letting a pan begin: a drag inside an active
+    /// text view is the user selecting words, not moving the node.
+    public func isEditingText(at point: CGPoint) -> Bool {
+        textViews.values.contains { $0.isFirstResponder && $0.frame.contains(point) }
     }
 
     /// Put the cursor in whichever node covers this point.
@@ -184,6 +200,31 @@ extension NodeTextOverlay: UITextViewDelegate {
         let zoom = currentZoom(of: textView)
         let needed = worldSizeNeeded(for: textView, zoom: zoom)
         onTextSizeChanged?(nodeId, needed.width, needed.height)
+    }
+
+    /// Add "Expand" to the selection menu, alongside Cut/Copy/Paste.
+    ///
+    /// The system edit menu is where anyone would look for something to do with
+    /// selected text, so the feature costs no new UI of its own.
+    public func textView(
+        _ textView: UITextView,
+        editMenuForTextIn range: NSRange,
+        suggestedActions: [UIMenuElement]
+    ) -> UIMenu? {
+        guard range.length > 0,
+              let nodeId = textView.nodeId,
+              let full = textView.text,
+              let selectedRange = textView.selectedTextRange,
+              let selected = textView.text(in: selectedRange),
+              !selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+
+        let expand = UIAction(title: "Expand", image: UIImage(systemName: "sparkles")) {
+            [weak self] _ in
+            self?.onExpandSelection?(nodeId, selected, full)
+        }
+
+        return UIMenu(children: suggestedActions + [expand])
     }
 
     public func textViewDidEndEditing(_ textView: UITextView) {

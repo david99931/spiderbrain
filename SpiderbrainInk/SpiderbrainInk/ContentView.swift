@@ -171,6 +171,9 @@ struct ContentView: View {
                         },
                         onConnectionSelected: { connectionId in
                             selectedConnectionId = connectionId
+                        },
+                        onExpandSelection: { nodeId, selected, fullText in
+                            expandSelection(nodeId: nodeId, selected: selected, fullText: fullText)
                         }
                     )
                     .id("metal")
@@ -816,44 +819,55 @@ struct ContentView: View {
 
     // MARK: - Canvas Sync
 
-    /// Ask the model about a node's contents.
-    ///
-    /// The reply currently lands in the line under the toolbar. Step 4 turns it
-    /// into a node of its own, connected back to this one.
+    /// Ask the model about a node's full contents.
     private func promptNode(_ node: Node) {
         guard let prompt = node.promptText else { return }
+        sendPrompt(PromptRequest(context: prompt), from: node.id)
+    }
+
+    /// Ask the model about the part of a node the user highlighted.
+    private func expandSelection(nodeId: UUID, selected: String, fullText: String) {
+        sendPrompt(
+            PromptRequest(context: fullText, focus: selected),
+            from: nodeId
+        )
+    }
+
+    /// Fire a request and place the reply as a node linked back to the source.
+    private func sendPrompt(_ request: PromptRequest, from nodeId: UUID) {
         guard let apiKey = Secrets.anthropicAPIKey else {
             latestReply = "No API key — check Secrets.plist is in the bundle."
             return
         }
-
         // A second tap replaces the first request rather than racing it.
-        promptTasks[node.id]?.cancel()
+        promptTasks[nodeId]?.cancel()
 
-        promptingNodeIds.insert(node.id)
+        promptingNodeIds.insert(nodeId)
         latestReply = "Asking…"
 
-        promptTasks[node.id] = Task {
+        promptTasks[nodeId] = Task {
             let service = AnthropicPromptService(apiKey: apiKey)
             do {
-                let reply = try await service.complete(prompt: prompt)
+                let reply = try await service.complete(request)
                 guard !Task.isCancelled else { return }
 
                 let fitted = NodeTextMeasurer.boundsFitting(reply)
                 pendingReply = (
-                    sourceId: node.id,
+                    sourceId: nodeId,
                     text: reply,
                     size: Vec2(fitted.width, fitted.height)
                 )
                 addReplyToken += 1
                 latestReply = nil
+            } catch is CancellationError {
+                // Superseded by a newer request; say nothing.
             } catch {
                 guard !Task.isCancelled else { return }
-                latestReply = "Failed: \(error)"
+                latestReply = error.localizedDescription
             }
 
-            promptingNodeIds.remove(node.id)
-            promptTasks[node.id] = nil
+            promptingNodeIds.remove(nodeId)
+            promptTasks[nodeId] = nil
         }
     }
 
@@ -1142,6 +1156,7 @@ private struct MetalInkCanvas: UIViewRepresentable {
     var onClosedShapeWithNodes: ((UUID, [UUID]) -> Void)?
     var onNodeSelected: ((UUID?) -> Void)?
     var onConnectionSelected: ((UUID?) -> Void)?
+    var onExpandSelection: ((UUID, String, String) -> Void)?
 
     func makeUIView(context: Context) -> MetalInkView {
         guard let view = MetalInkView(frame: .zero) else {
@@ -1191,6 +1206,8 @@ private struct MetalInkCanvas: UIViewRepresentable {
             syncCoordinator.clearCanvas()
         }
 
+        view.onExpandSelection = onExpandSelection
+
         // Store reference for receiving strokes and nodes
         syncCoordinator.metalView = view
 
@@ -1209,6 +1226,9 @@ private struct MetalInkCanvas: UIViewRepresentable {
         view.interactionMode = interactionMode
         view.onClosedShapeDetected = onClosedShapeDetected
         view.onNodeSelected = onNodeSelected
+        // Rebound every update: a closure captured once in `makeUIView` closes
+        // over the initial view struct, so its `@State` writes land on a stale copy.
+        view.onExpandSelection = onExpandSelection
 
         if context.coordinator.lastClear != clearToken {
             context.coordinator.lastClear = clearToken

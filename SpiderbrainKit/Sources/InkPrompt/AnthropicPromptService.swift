@@ -8,13 +8,43 @@ import InkCore
 /// and a response whose `content` is an array of typed blocks.
 public struct AnthropicPromptService: PromptService {
 
-    public enum Failure: Error, Equatable {
+    public enum Failure: LocalizedError, Equatable {
         /// No API key was configured.
         case missingAPIKey
         /// The API rejected the request. Carries the status and any message.
         case requestFailed(status: Int, message: String?)
+        /// The request never reached the API.
+        case couldNotReachAPI
         /// The response arrived but held no text.
         case noTextInResponse
+
+        /// Plain sentences rather than enum dumps: these surface directly in the
+        /// UI, and the common failures here are ordinary and worth naming — a
+        /// rate limit and an overloaded server both mean "wait and retry".
+        public var errorDescription: String? {
+            switch self {
+            case .missingAPIKey:
+                return "No API key — check Secrets.plist is in the app bundle."
+            case .couldNotReachAPI:
+                return "Couldn't reach the API. Check your connection."
+            case .noTextInResponse:
+                return "The model replied with nothing."
+            case .requestFailed(let status, let message):
+                switch status {
+                case 401:
+                    return "API key was rejected."
+                case 429:
+                    return "Rate limited — wait a moment and try again."
+                case 529:
+                    return "The API is overloaded — try again shortly."
+                case 500...599:
+                    return "The API had a problem (\(status)) — try again shortly."
+                default:
+                    return message.map { "Request failed (\(status)): \($0)" }
+                        ?? "Request failed (\(status))."
+                }
+            }
+        }
     }
 
     private let apiKey: String
@@ -48,8 +78,10 @@ public struct AnthropicPromptService: PromptService {
         self.session = session
     }
 
-    public func complete(prompt: String) async throws -> String {
+    public func complete(_ promptRequest: PromptRequest) async throws -> String {
         guard !apiKey.isEmpty else { throw Failure.missingAPIKey }
+
+        let prompt = Self.userMessage(for: promptRequest)
 
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
@@ -65,7 +97,18 @@ public struct AnthropicPromptService: PromptService {
             )
         )
 
-        let (data, response) = try await session.data(for: request)
+        // `URLSession` throws `CancellationError` if the enclosing task is already
+        // cancelled, so a cancelled prompt genuinely stops rather than running on
+        // and having its result discarded.
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Failure.couldNotReachAPI
+        }
 
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
@@ -83,6 +126,23 @@ public struct AnthropicPromptService: PromptService {
 
         guard !text.isEmpty else { throw Failure.noTextInResponse }
         return text
+    }
+
+    /// Turn a request into the text the model sees.
+    ///
+    /// A focused request names the note first and the highlighted part second, so
+    /// the model has somewhere to stand before being told where to look. Without
+    /// the surrounding note, a fragment like "the second one" is unanswerable.
+    static func userMessage(for request: PromptRequest) -> String {
+        guard let focus = request.focus else { return request.context }
+
+        return """
+            Here is my note:
+
+            \(request.context)
+
+            Focus on this part of it: "\(focus)"
+            """
     }
 
     /// Pull the human-readable reason out of an error body, if there is one.

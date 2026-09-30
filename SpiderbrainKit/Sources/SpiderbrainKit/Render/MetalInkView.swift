@@ -172,6 +172,10 @@ public final class MetalInkView: UIView {
     /// Callback when the canvas is cleared (for sync).
     public var onCanvasCleared: (() -> Void)?
 
+    /// Callback when the user highlights part of a node's text and asks to expand
+    /// on it. Passes the node, the highlighted phrase, and the node's full text.
+    public var onExpandSelection: ((UUID, String, String) -> Void)?
+
     /// What a touch means right now.
     public enum InteractionMode {
         /// Pencil and pointer draw ink.
@@ -278,6 +282,9 @@ public final class MetalInkView: UIView {
                 onNodeId: nodeId,
                 fittingBounds: fitted ?? Rect(x: 0, y: 0, width: 0, height: 0)
             )
+        }
+        textOverlay.onExpandSelection = { [weak self] nodeId, selected, full in
+            self?.onExpandSelection?(nodeId, selected, full)
         }
         textOverlay.onTextSizeChanged = { [weak self] nodeId, width, height in
             guard let self, let node = self.canvas.node(withId: nodeId) else { return }
@@ -1144,6 +1151,12 @@ extension MetalInkView: UIGestureRecognizerDelegate {
     public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         // Don't allow pan/zoom to start while drawing
         if collector.isDrawing {
+            return false
+        }
+
+        // A drag inside a text view being edited is the user selecting words, not
+        // moving the node — let the text view have it.
+        if textOverlay.isEditingText(at: gestureRecognizer.location(in: textOverlay)) {
             return false
         }
 
